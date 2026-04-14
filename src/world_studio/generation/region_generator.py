@@ -20,7 +20,8 @@ class RegionGenerator:
                     {
                         "name": name,
                         "kingdom_ref": kingdom_ref,
-                        "biome": choose_biome(context.rng),
+                        "biome": context.modifiers.biome_override
+                        or choose_biome(context.rng),
                         "is_locked": context.settings.lock_generated_political,
                     },
                 )

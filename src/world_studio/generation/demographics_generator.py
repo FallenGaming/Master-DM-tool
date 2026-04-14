@@ -23,3 +23,4 @@ class DemographicsGenerator:
 
         if not context.race_refs:
             raise ValueError("No races available for generation.")
+
