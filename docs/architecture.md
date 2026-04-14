@@ -304,6 +304,22 @@ Status:
 Goal:
 - Rich NPC/relationship models and editors with lock/override semantics.
 
+Status:
+- implemented social repository support for:
+  - races
+  - subraces
+  - occupations
+  - traits
+  - NPCs
+  - relationships
+- implemented `SocialService` with lock enforcement and explicit force-override paths for GM control.
+- implemented an `NPCs & Relationships` desktop page with:
+  - NPC create/update/delete
+  - relationship create/update/delete
+  - lock toggles
+  - force-override actions for locked entities
+- added automated tests for social repositories and lock override behavior.
+
 ### Phase 4
 Goal:
 - Simulation pipeline passes, preview support, run logging, result inspection.

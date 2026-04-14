@@ -4,8 +4,13 @@ from dataclasses import asdict
 from pathlib import Path
 from uuid import uuid4
 
-from world_studio.data.repositories import HierarchyRepository, WorldRepository
-from world_studio.domain.enums import NodeType, SettlementType
+from world_studio.data.repositories import (
+    HierarchyRepository,
+    SocialRepository,
+    WorldRepository,
+)
+from world_studio.domain.enums import NodeType, RelationshipType, SettlementType
+from world_studio.domain.population import Npc, Occupation, Race, Relationship
 from world_studio.domain.simulation import SimulationEngine, SimulationRequest, SimulationRun
 from world_studio.domain.world import (
     Continent,
@@ -316,6 +321,185 @@ class SimulationService:
             msg = f"world_ref does not exist: {request.world_ref}"
             raise ValueError(msg)
         return self._engine.run(request)
+
+
+class SocialService:
+    def __init__(self, social_repository: SocialRepository) -> None:
+        self._social_repository = social_repository
+
+    def list_races(self) -> list[Race]:
+        return self._social_repository.list_races()
+
+    def create_race(self, payload: dict[str, object]) -> Race:
+        race = Race(
+            id=None,
+            ext_ref=str(uuid4()),
+            name=str(payload.get("name", "")).strip(),
+            lifespan_years=self._to_int(payload.get("lifespan_years"), 80),
+            is_default=bool(payload.get("is_default", False)),
+        )
+        if not race.name:
+            raise ValueError("Race name is required.")
+        return self._social_repository.upsert_race(race)
+
+    def list_occupations(self) -> list[Occupation]:
+        return self._social_repository.list_occupations()
+
+    def create_occupation(self, payload: dict[str, object]) -> Occupation:
+        occupation = Occupation(
+            id=None,
+            ext_ref=str(uuid4()),
+            name=str(payload.get("name", "")).strip(),
+            category=str(payload.get("category", "")).strip(),
+            rarity=self._to_float(payload.get("rarity"), 1.0),
+        )
+        if not occupation.name:
+            raise ValueError("Occupation name is required.")
+        return self._social_repository.upsert_occupation(occupation)
+
+    def list_npcs(self, world_ref: str) -> list[Npc]:
+        return self._social_repository.list_npcs(world_ref)
+
+    def get_npc(self, ext_ref: str) -> Npc | None:
+        return self._social_repository.get_npc(ext_ref)
+
+    def create_npc(self, world_ref: str, payload: dict[str, object]) -> Npc:
+        race_ref = self._optional_text(payload.get("race_ref"))
+        if not race_ref:
+            raise ValueError("NPC race_ref is required.")
+        npc = Npc(
+            id=None,
+            ext_ref=str(uuid4()),
+            world_ref=world_ref,
+            display_name=str(payload.get("display_name", "")).strip(),
+            age_years=self._to_int(payload.get("age_years"), 20),
+            race_ref=race_ref,
+            subrace_ref=self._optional_text(payload.get("subrace_ref")),
+            occupation_ref=self._optional_text(payload.get("occupation_ref")),
+            residence_node_ref=self._optional_text(payload.get("residence_node_ref")),
+            health_index=self._to_float(payload.get("health_index"), 1.0),
+            wealth_index=self._to_float(payload.get("wealth_index"), 0.5),
+            notes=str(payload.get("notes", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+        )
+        if not npc.display_name:
+            raise ValueError("NPC display_name is required.")
+        return self._social_repository.upsert_npc(npc)
+
+    def update_npc(self, ext_ref: str, payload: dict[str, object], *, force: bool = False) -> Npc:
+        npc = self._require_entity(self._social_repository.get_npc(ext_ref), "NPC")
+        if npc.is_locked and not force:
+            raise ValueError("NPC is locked. Use override to force update.")
+        npc.display_name = str(payload.get("display_name", npc.display_name)).strip() or npc.display_name
+        npc.age_years = self._to_int(payload.get("age_years"), npc.age_years)
+        npc.race_ref = self._optional_text(payload.get("race_ref")) or npc.race_ref
+        npc.subrace_ref = self._optional_text(payload.get("subrace_ref"))
+        npc.occupation_ref = self._optional_text(payload.get("occupation_ref"))
+        npc.residence_node_ref = self._optional_text(payload.get("residence_node_ref"))
+        npc.health_index = self._to_float(payload.get("health_index"), npc.health_index)
+        npc.wealth_index = self._to_float(payload.get("wealth_index"), npc.wealth_index)
+        npc.notes = str(payload.get("notes", npc.notes)).strip()
+        if "is_locked" in payload:
+            npc.is_locked = bool(payload["is_locked"])
+        return self._social_repository.upsert_npc(npc)
+
+    def delete_npc(self, ext_ref: str, *, force: bool = False) -> None:
+        npc = self._require_entity(self._social_repository.get_npc(ext_ref), "NPC")
+        if npc.is_locked and not force:
+            raise ValueError("NPC is locked. Use override to force delete.")
+        self._social_repository.delete_npc(ext_ref)
+
+    def list_relationships(self, world_ref: str) -> list[Relationship]:
+        return self._social_repository.list_relationships(world_ref)
+
+    def get_relationship(self, ext_ref: str) -> Relationship | None:
+        return self._social_repository.get_relationship(ext_ref)
+
+    def create_relationship(self, world_ref: str, payload: dict[str, object]) -> Relationship:
+        source = self._optional_text(payload.get("source_npc_ref"))
+        target = self._optional_text(payload.get("target_npc_ref"))
+        if not source or not target:
+            raise ValueError("Relationship requires source_npc_ref and target_npc_ref.")
+        relationship = Relationship(
+            id=None,
+            ext_ref=str(uuid4()),
+            world_ref=world_ref,
+            source_npc_ref=source,
+            target_npc_ref=target,
+            relation_type=RelationshipType(str(payload.get("relation_type", RelationshipType.FRIEND.value))),
+            weight=self._to_float(payload.get("weight"), 0.0),
+            history=self._parse_history(payload.get("history", "")),
+            is_locked=bool(payload.get("is_locked", False)),
+        )
+        return self._social_repository.upsert_relationship(relationship)
+
+    def update_relationship(
+        self, ext_ref: str, payload: dict[str, object], *, force: bool = False
+    ) -> Relationship:
+        relationship = self._require_entity(
+            self._social_repository.get_relationship(ext_ref), "Relationship"
+        )
+        if relationship.is_locked and not force:
+            raise ValueError("Relationship is locked. Use override to force update.")
+        relationship.source_npc_ref = (
+            self._optional_text(payload.get("source_npc_ref")) or relationship.source_npc_ref
+        )
+        relationship.target_npc_ref = (
+            self._optional_text(payload.get("target_npc_ref")) or relationship.target_npc_ref
+        )
+        relationship.relation_type = RelationshipType(
+            str(payload.get("relation_type", relationship.relation_type.value))
+        )
+        relationship.weight = self._to_float(payload.get("weight"), relationship.weight)
+        if "history" in payload:
+            relationship.history = self._parse_history(payload.get("history"))
+        if "is_locked" in payload:
+            relationship.is_locked = bool(payload["is_locked"])
+        return self._social_repository.upsert_relationship(relationship)
+
+    def delete_relationship(self, ext_ref: str, *, force: bool = False) -> None:
+        relationship = self._require_entity(
+            self._social_repository.get_relationship(ext_ref), "Relationship"
+        )
+        if relationship.is_locked and not force:
+            raise ValueError("Relationship is locked. Use override to force delete.")
+        self._social_repository.delete_relationship(ext_ref)
+
+    @staticmethod
+    def _optional_text(value: object | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _to_int(value: object | None, default: int) -> int:
+        if value is None or value == "":
+            return default
+        return int(value)
+
+    @staticmethod
+    def _to_float(value: object | None, default: float) -> float:
+        if value is None or value == "":
+            return default
+        return float(value)
+
+    @staticmethod
+    def _parse_history(value: object | None) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        text = str(value).strip()
+        if not text:
+            return []
+        return [line.strip() for line in text.splitlines() if line.strip()]
+
+    @staticmethod
+    def _require_entity(entity: object | None, label: str) -> object:
+        if entity is None:
+            raise ValueError(f"{label} does not exist.")
+        return entity
 
 
 class ImportExportService:

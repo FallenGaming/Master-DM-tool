@@ -34,3 +34,7 @@ See [docs/architecture.md](docs/architecture.md) for:
   - settlements
   - points of interest
   - routes
+- Phase 3: rich social systems (NPCs/relationships) with lock + force-override workflows, including:
+  - social repository CRUD for races/subraces/occupations/traits/NPCs/relationships
+  - `SocialService` lock enforcement with explicit override path
+  - dedicated "NPCs & Relationships" UI page with editor workflows
