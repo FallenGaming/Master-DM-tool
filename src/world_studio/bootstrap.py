@@ -5,12 +5,13 @@ from dataclasses import dataclass
 from world_studio.application.services import (
     HierarchyService,
     ImportExportService,
+    SocialService,
     SimulationService,
     WorldService,
 )
 from world_studio.config import AppPaths, build_default_paths
 from world_studio.data.database import Database
-from world_studio.data.repositories import HierarchyRepository, WorldRepository
+from world_studio.data.repositories import HierarchyRepository, SocialRepository, WorldRepository
 from world_studio.infrastructure.json_io import JsonWorldCodec
 from world_studio.infrastructure.pdf_export import PdfExporter
 
@@ -21,8 +22,10 @@ class ServiceContainer:
     database: Database
     world_repository: WorldRepository
     hierarchy_repository: HierarchyRepository
+    social_repository: SocialRepository
     world_service: WorldService
     hierarchy_service: HierarchyService
+    social_service: SocialService
     simulation_service: SimulationService
     import_export_service: ImportExportService
 
@@ -32,8 +35,10 @@ def build_container() -> ServiceContainer:
     database = Database(paths.database_path)
     world_repository = WorldRepository(database)
     hierarchy_repository = HierarchyRepository(database)
+    social_repository = SocialRepository(database)
     world_service = WorldService(world_repository)
     hierarchy_service = HierarchyService(hierarchy_repository)
+    social_service = SocialService(social_repository)
     simulation_service = SimulationService(world_repository)
     import_export_service = ImportExportService(
         world_repository=world_repository,
@@ -46,8 +51,10 @@ def build_container() -> ServiceContainer:
         database=database,
         world_repository=world_repository,
         hierarchy_repository=hierarchy_repository,
+        social_repository=social_repository,
         world_service=world_service,
         hierarchy_service=hierarchy_service,
+        social_service=social_service,
         simulation_service=simulation_service,
         import_export_service=import_export_service,
     )

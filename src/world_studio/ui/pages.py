@@ -24,10 +24,11 @@ from PySide6.QtWidgets import (
 from world_studio.application.services import (
     HierarchyService,
     ImportExportService,
+    SocialService,
     SimulationService,
     WorldService,
 )
-from world_studio.domain.enums import NodeType, SettlementType, SimulationStep
+from world_studio.domain.enums import NodeType, RelationshipType, SettlementType, SimulationStep
 from world_studio.domain.simulation import SimulationRequest
 from world_studio.domain.world import World
 
@@ -478,6 +479,342 @@ class HierarchyEditorPage(QWidget):
         for spec in specs:
             panel = EntityCrudPanel(world_service, hierarchy_service, spec)
             tabs.addTab(panel, spec.title)
+
+
+class NpcRelationshipPage(QWidget):
+    def __init__(self, world_service: WorldService, social_service: SocialService) -> None:
+        super().__init__()
+        self._world_service = world_service
+        self._social_service = social_service
+        self._selected_npc_ref: str | None = None
+        self._selected_relationship_ref: str | None = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("NPC & Relationship Manager"))
+
+        world_row = QHBoxLayout()
+        self._world_ref_input = QLineEdit()
+        self._world_ref_input.setPlaceholderText("world ext_ref")
+        load_button = QPushButton("Load World")
+        load_button.clicked.connect(self.refresh)
+        world_row.addWidget(QLabel("World Ref"))
+        world_row.addWidget(self._world_ref_input)
+        world_row.addWidget(load_button)
+        layout.addLayout(world_row)
+
+        split_row = QHBoxLayout()
+        split_row.addWidget(self._build_npc_panel(), stretch=1)
+        split_row.addWidget(self._build_relationship_panel(), stretch=1)
+        layout.addLayout(split_row)
+
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
+        layout.addStretch()
+
+    def _build_npc_panel(self) -> QWidget:
+        panel = QGroupBox("NPC Editor")
+        root = QVBoxLayout(panel)
+        self._npc_list = QListWidget()
+        self._npc_list.currentTextChanged.connect(self._on_select_npc)
+        root.addWidget(self._npc_list)
+
+        form = QFormLayout()
+        self._npc_display_name = QLineEdit()
+        self._npc_age_years = QLineEdit()
+        self._npc_race_ref = QLineEdit()
+        self._npc_subrace_ref = QLineEdit()
+        self._npc_occupation_ref = QLineEdit()
+        self._npc_residence_node_ref = QLineEdit()
+        self._npc_health_index = QLineEdit()
+        self._npc_wealth_index = QLineEdit()
+        self._npc_notes = QTextEdit()
+        self._npc_notes.setFixedHeight(70)
+        self._npc_is_locked = QCheckBox("Locked")
+        form.addRow("Name", self._npc_display_name)
+        form.addRow("Age", self._npc_age_years)
+        form.addRow("Race Ref", self._npc_race_ref)
+        form.addRow("Subrace Ref", self._npc_subrace_ref)
+        form.addRow("Occupation Ref", self._npc_occupation_ref)
+        form.addRow("Residence Ref", self._npc_residence_node_ref)
+        form.addRow("Health Index", self._npc_health_index)
+        form.addRow("Wealth Index", self._npc_wealth_index)
+        form.addRow("Notes", self._npc_notes)
+        form.addRow("", self._npc_is_locked)
+        root.addLayout(form)
+
+        buttons = QHBoxLayout()
+        create_button = QPushButton("Create")
+        save_button = QPushButton("Save")
+        save_force_button = QPushButton("Save (Force Override)")
+        delete_button = QPushButton("Delete")
+        delete_force_button = QPushButton("Delete (Force)")
+        clear_button = QPushButton("Clear")
+        create_button.clicked.connect(self._create_npc)
+        save_button.clicked.connect(lambda: self._save_npc(force=False))
+        save_force_button.clicked.connect(lambda: self._save_npc(force=True))
+        delete_button.clicked.connect(lambda: self._delete_npc(force=False))
+        delete_force_button.clicked.connect(lambda: self._delete_npc(force=True))
+        clear_button.clicked.connect(self._clear_npc_form)
+        buttons.addWidget(create_button)
+        buttons.addWidget(save_button)
+        buttons.addWidget(save_force_button)
+        buttons.addWidget(delete_button)
+        buttons.addWidget(delete_force_button)
+        buttons.addWidget(clear_button)
+        root.addLayout(buttons)
+        return panel
+
+    def _build_relationship_panel(self) -> QWidget:
+        panel = QGroupBox("Relationship Editor")
+        root = QVBoxLayout(panel)
+        self._relationship_list = QListWidget()
+        self._relationship_list.currentTextChanged.connect(self._on_select_relationship)
+        root.addWidget(self._relationship_list)
+
+        form = QFormLayout()
+        self._rel_source_ref = QLineEdit()
+        self._rel_target_ref = QLineEdit()
+        self._rel_type = QComboBox()
+        self._rel_type.addItems([value.value for value in RelationshipType])
+        self._rel_weight = QLineEdit()
+        self._rel_history = QTextEdit()
+        self._rel_history.setFixedHeight(70)
+        self._rel_is_locked = QCheckBox("Locked")
+        form.addRow("Source NPC Ref", self._rel_source_ref)
+        form.addRow("Target NPC Ref", self._rel_target_ref)
+        form.addRow("Relation Type", self._rel_type)
+        form.addRow("Weight", self._rel_weight)
+        form.addRow("History (line-separated)", self._rel_history)
+        form.addRow("", self._rel_is_locked)
+        root.addLayout(form)
+
+        buttons = QHBoxLayout()
+        create_button = QPushButton("Create")
+        save_button = QPushButton("Save")
+        save_force_button = QPushButton("Save (Force Override)")
+        delete_button = QPushButton("Delete")
+        delete_force_button = QPushButton("Delete (Force)")
+        clear_button = QPushButton("Clear")
+        create_button.clicked.connect(self._create_relationship)
+        save_button.clicked.connect(lambda: self._save_relationship(force=False))
+        save_force_button.clicked.connect(lambda: self._save_relationship(force=True))
+        delete_button.clicked.connect(lambda: self._delete_relationship(force=False))
+        delete_force_button.clicked.connect(lambda: self._delete_relationship(force=True))
+        clear_button.clicked.connect(self._clear_relationship_form)
+        buttons.addWidget(create_button)
+        buttons.addWidget(save_button)
+        buttons.addWidget(save_force_button)
+        buttons.addWidget(delete_button)
+        buttons.addWidget(delete_force_button)
+        buttons.addWidget(clear_button)
+        root.addLayout(buttons)
+        return panel
+
+    def refresh(self) -> None:
+        world_ref = self._resolve_world_ref()
+        self._npc_list.clear()
+        self._relationship_list.clear()
+        self._selected_npc_ref = None
+        self._selected_relationship_ref = None
+        if not world_ref:
+            self._set_status("Create or select a world first.")
+            return
+
+        npcs = self._social_service.list_npcs(world_ref)
+        relationships = self._social_service.list_relationships(world_ref)
+        for npc in npcs:
+            lock_marker = " [locked]" if npc.is_locked else ""
+            self._npc_list.addItem(f"{npc.display_name}{lock_marker} ({npc.ext_ref})")
+        for rel in relationships:
+            lock_marker = " [locked]" if rel.is_locked else ""
+            label = (
+                f"{rel.relation_type.value}: {rel.source_npc_ref[:8]} -> {rel.target_npc_ref[:8]}"
+                f"{lock_marker} ({rel.ext_ref})"
+            )
+            self._relationship_list.addItem(label)
+
+        self._set_status(
+            f"Loaded {len(npcs)} NPC(s) and {len(relationships)} relationship(s) for world {world_ref}."
+        )
+
+    def _resolve_world_ref(self) -> str:
+        world_ref = self._world_ref_input.text().strip()
+        if world_ref:
+            return world_ref
+        worlds = self._world_service.list_worlds()
+        if not worlds:
+            return ""
+        world_ref = worlds[0].ext_ref
+        self._world_ref_input.setText(world_ref)
+        return world_ref
+
+    def _create_npc(self) -> None:
+        world_ref = self._resolve_world_ref()
+        if not world_ref:
+            self._set_status("Cannot create NPC without a world.")
+            return
+        try:
+            self._social_service.create_npc(world_ref, self._npc_payload())
+        except (ValueError, TypeError) as exc:
+            self._set_status(f"NPC create failed: {exc}")
+            return
+        self.refresh()
+        self._clear_npc_form()
+
+    def _save_npc(self, *, force: bool) -> None:
+        if not self._selected_npc_ref:
+            self._set_status("Select an NPC first.")
+            return
+        try:
+            self._social_service.update_npc(self._selected_npc_ref, self._npc_payload(), force=force)
+        except (ValueError, TypeError) as exc:
+            self._set_status(f"NPC save failed: {exc}")
+            return
+        self.refresh()
+        self._set_status("NPC saved.")
+
+    def _delete_npc(self, *, force: bool) -> None:
+        if not self._selected_npc_ref:
+            self._set_status("Select an NPC first.")
+            return
+        try:
+            self._social_service.delete_npc(self._selected_npc_ref, force=force)
+        except ValueError as exc:
+            self._set_status(f"NPC delete failed: {exc}")
+            return
+        self.refresh()
+        self._clear_npc_form()
+        self._set_status("NPC deleted.")
+
+    def _on_select_npc(self, value: str) -> None:
+        if not value:
+            self._selected_npc_ref = None
+            return
+        ext_ref = value[value.rfind("(") + 1 : -1]
+        npc = self._social_service.get_npc(ext_ref)
+        if npc is None:
+            self._selected_npc_ref = None
+            return
+        self._selected_npc_ref = npc.ext_ref
+        self._npc_display_name.setText(npc.display_name)
+        self._npc_age_years.setText(str(npc.age_years))
+        self._npc_race_ref.setText(npc.race_ref)
+        self._npc_subrace_ref.setText(npc.subrace_ref or "")
+        self._npc_occupation_ref.setText(npc.occupation_ref or "")
+        self._npc_residence_node_ref.setText(npc.residence_node_ref or "")
+        self._npc_health_index.setText(str(npc.health_index))
+        self._npc_wealth_index.setText(str(npc.wealth_index))
+        self._npc_notes.setPlainText(npc.notes)
+        self._npc_is_locked.setChecked(npc.is_locked)
+
+    def _npc_payload(self) -> dict[str, object]:
+        return {
+            "display_name": self._npc_display_name.text().strip(),
+            "age_years": self._npc_age_years.text().strip(),
+            "race_ref": self._npc_race_ref.text().strip(),
+            "subrace_ref": self._npc_subrace_ref.text().strip(),
+            "occupation_ref": self._npc_occupation_ref.text().strip(),
+            "residence_node_ref": self._npc_residence_node_ref.text().strip(),
+            "health_index": self._npc_health_index.text().strip(),
+            "wealth_index": self._npc_wealth_index.text().strip(),
+            "notes": self._npc_notes.toPlainText().strip(),
+            "is_locked": self._npc_is_locked.isChecked(),
+        }
+
+    def _clear_npc_form(self) -> None:
+        self._selected_npc_ref = None
+        self._npc_display_name.clear()
+        self._npc_age_years.clear()
+        self._npc_race_ref.clear()
+        self._npc_subrace_ref.clear()
+        self._npc_occupation_ref.clear()
+        self._npc_residence_node_ref.clear()
+        self._npc_health_index.clear()
+        self._npc_wealth_index.clear()
+        self._npc_notes.clear()
+        self._npc_is_locked.setChecked(False)
+
+    def _create_relationship(self) -> None:
+        world_ref = self._resolve_world_ref()
+        if not world_ref:
+            self._set_status("Cannot create relationship without a world.")
+            return
+        try:
+            self._social_service.create_relationship(world_ref, self._relationship_payload())
+        except (ValueError, TypeError) as exc:
+            self._set_status(f"Relationship create failed: {exc}")
+            return
+        self.refresh()
+        self._clear_relationship_form()
+
+    def _save_relationship(self, *, force: bool) -> None:
+        if not self._selected_relationship_ref:
+            self._set_status("Select a relationship first.")
+            return
+        try:
+            self._social_service.update_relationship(
+                self._selected_relationship_ref, self._relationship_payload(), force=force
+            )
+        except (ValueError, TypeError) as exc:
+            self._set_status(f"Relationship save failed: {exc}")
+            return
+        self.refresh()
+        self._set_status("Relationship saved.")
+
+    def _delete_relationship(self, *, force: bool) -> None:
+        if not self._selected_relationship_ref:
+            self._set_status("Select a relationship first.")
+            return
+        try:
+            self._social_service.delete_relationship(self._selected_relationship_ref, force=force)
+        except ValueError as exc:
+            self._set_status(f"Relationship delete failed: {exc}")
+            return
+        self.refresh()
+        self._clear_relationship_form()
+        self._set_status("Relationship deleted.")
+
+    def _on_select_relationship(self, value: str) -> None:
+        if not value:
+            self._selected_relationship_ref = None
+            return
+        ext_ref = value[value.rfind("(") + 1 : -1]
+        relationship = self._social_service.get_relationship(ext_ref)
+        if relationship is None:
+            self._selected_relationship_ref = None
+            return
+        self._selected_relationship_ref = relationship.ext_ref
+        self._rel_source_ref.setText(relationship.source_npc_ref)
+        self._rel_target_ref.setText(relationship.target_npc_ref)
+        idx = self._rel_type.findText(relationship.relation_type.value)
+        if idx >= 0:
+            self._rel_type.setCurrentIndex(idx)
+        self._rel_weight.setText(str(relationship.weight))
+        self._rel_history.setPlainText("\n".join(relationship.history))
+        self._rel_is_locked.setChecked(relationship.is_locked)
+
+    def _relationship_payload(self) -> dict[str, object]:
+        return {
+            "source_npc_ref": self._rel_source_ref.text().strip(),
+            "target_npc_ref": self._rel_target_ref.text().strip(),
+            "relation_type": self._rel_type.currentText(),
+            "weight": self._rel_weight.text().strip(),
+            "history": self._rel_history.toPlainText(),
+            "is_locked": self._rel_is_locked.isChecked(),
+        }
+
+    def _clear_relationship_form(self) -> None:
+        self._selected_relationship_ref = None
+        self._rel_source_ref.clear()
+        self._rel_target_ref.clear()
+        self._rel_weight.clear()
+        self._rel_history.clear()
+        self._rel_is_locked.setChecked(False)
+        self._rel_type.setCurrentIndex(0)
+
+    def _set_status(self, message: str) -> None:
+        self._status.setText(message)
 
 
 class SimulationPage(QWidget):

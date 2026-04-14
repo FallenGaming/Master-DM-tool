@@ -15,6 +15,7 @@ from world_studio.ui.pages import (
     HierarchyEditorPage,
     ImportExportPage,
     MapPage,
+    NpcRelationshipPage,
     SimulationPage,
     WorldBrowserPage,
 )
@@ -40,6 +41,9 @@ class MainWindow(QMainWindow):
             "World Browser": WorldBrowserPage(container.world_service),
             "Hierarchy Editor": HierarchyEditorPage(
                 container.world_service, container.hierarchy_service
+            ),
+            "NPCs & Relationships": NpcRelationshipPage(
+                container.world_service, container.social_service
             ),
             "Simulation": SimulationPage(container.world_service, container.simulation_service),
             "Import/Export": ImportExportPage(container.world_service, container.import_export_service),

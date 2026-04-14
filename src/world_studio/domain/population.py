@@ -81,3 +81,5 @@ class Relationship:
     history: list[str] = field(default_factory=list)
     is_locked: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    created_utc: datetime = field(default_factory=utc_now)
+    updated_utc: datetime = field(default_factory=utc_now)
