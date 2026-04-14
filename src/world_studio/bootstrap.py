@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from world_studio.application.services import (
+    GenerationAppService,
     HierarchyService,
     ImportExportService,
     SocialService,
@@ -26,6 +27,7 @@ class ServiceContainer:
     world_service: WorldService
     hierarchy_service: HierarchyService
     social_service: SocialService
+    generation_service: GenerationAppService
     simulation_service: SimulationService
     import_export_service: ImportExportService
 
@@ -39,6 +41,7 @@ def build_container() -> ServiceContainer:
     world_service = WorldService(world_repository)
     hierarchy_service = HierarchyService(hierarchy_repository)
     social_service = SocialService(social_repository)
+    generation_service = GenerationAppService(world_service, hierarchy_service, social_service)
     simulation_service = SimulationService(world_repository)
     import_export_service = ImportExportService(
         world_repository=world_repository,
@@ -55,6 +58,7 @@ def build_container() -> ServiceContainer:
         world_service=world_service,
         hierarchy_service=hierarchy_service,
         social_service=social_service,
+        generation_service=generation_service,
         simulation_service=simulation_service,
         import_export_service=import_export_service,
     )
