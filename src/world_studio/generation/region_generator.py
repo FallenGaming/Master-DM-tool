@@ -26,4 +26,5 @@ class RegionGenerator:
                     },
                 )
                 context.region_refs.append(region.ext_ref)
+                context.kingdom_ref_by_region[region.ext_ref] = kingdom_ref
                 context.increment("regions")

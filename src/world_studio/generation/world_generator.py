@@ -19,7 +19,10 @@ from world_studio.generation.occupation_allocator import OccupationAllocator
 from world_studio.generation.political_generator import PoliticalGenerator
 from world_studio.generation.region_generator import RegionGenerator
 from world_studio.generation.relationship_seed_generator import RelationshipSeedGenerator
+from world_studio.generation.route_generator import RouteGenerator
 from world_studio.generation.settlement_generator import SettlementGenerator
+from world_studio.generation.settlement_promotion_rules import SettlementPromotionGenerator
+from world_studio.generation.spatial_generator import SpatialGenerator
 
 
 class WorldGenerationService:
@@ -54,7 +57,10 @@ class WorldGenerationService:
         ContinentGenerator().generate(self._hierarchy_service, context)
         PoliticalGenerator().generate(self._hierarchy_service, context)
         RegionGenerator().generate(self._hierarchy_service, context)
+        SpatialGenerator().generate(self._hierarchy_service, context)
         SettlementGenerator().generate(self._hierarchy_service, context)
+        RouteGenerator().generate(self._hierarchy_service, context)
+        SettlementPromotionGenerator().apply(self._hierarchy_service, context)
         NpcGenerator().generate(self._social_service, context)
         RelationshipSeedGenerator().generate(self._social_service, context)
         NarrativeSeedBuilder().build(context)
@@ -66,6 +72,7 @@ class WorldGenerationService:
             "regions": context.counts.get("regions", 0),
             "settlements": context.counts.get("settlements", 0),
             "points_of_interest": context.counts.get("points_of_interest", 0),
+            "routes": context.counts.get("routes", 0),
             "npcs": context.counts.get("npcs", 0),
             "relationships": context.counts.get("relationships", 0),
             "event_footprints": len(context.modifiers.event_footprints),

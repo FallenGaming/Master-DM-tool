@@ -81,6 +81,7 @@ class GenerationContext:
     kingdom_refs: list[str] = field(default_factory=list)
     region_refs: list[str] = field(default_factory=list)
     settlement_refs: list[str] = field(default_factory=list)
+    route_refs: list[str] = field(default_factory=list)
     settlement_population: dict[str, int] = field(default_factory=dict)
     npc_refs: list[str] = field(default_factory=list)
 
@@ -98,6 +99,13 @@ class GenerationContext:
     kingdom_ref_by_region: dict[str, str] = field(default_factory=dict)
     continent_ref_by_empire: dict[str, str] = field(default_factory=dict)
     empire_ref_by_kingdom: dict[str, str] = field(default_factory=dict)
+    continent_centers: dict[str, tuple[float, float]] = field(default_factory=dict)
+    empire_centers: dict[str, tuple[float, float]] = field(default_factory=dict)
+    kingdom_centers: dict[str, tuple[float, float]] = field(default_factory=dict)
+    region_centers: dict[str, tuple[float, float]] = field(default_factory=dict)
+    region_radii: dict[str, float] = field(default_factory=dict)
+    route_degree_by_settlement: dict[str, int] = field(default_factory=dict)
+    settlement_route_density: dict[str, int] = field(default_factory=dict)
 
     def increment(self, key: str, amount: int = 1) -> None:
         self.counts[key] = self.counts.get(key, 0) + amount
