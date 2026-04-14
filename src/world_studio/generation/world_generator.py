@@ -6,11 +6,14 @@ from random import Random
 
 from world_studio.generation.continent_generator import ContinentGenerator
 from world_studio.generation.demographics_generator import DemographicsGenerator
+from world_studio.generation.event_aware_generation import EventAwareGenerationResolver
 from world_studio.generation.generation_models import (
     GenerationContext,
     GenerationRequest,
     GenerationRunSummary,
 )
+from world_studio.generation.history_context_builder import HistoryContextBuilder
+from world_studio.generation.narrative_seed_builder import NarrativeSeedBuilder
 from world_studio.generation.npc_generator import NpcGenerator
 from world_studio.generation.occupation_allocator import OccupationAllocator
 from world_studio.generation.political_generator import PoliticalGenerator
@@ -42,6 +45,10 @@ class WorldGenerationService:
             rng=Random(settings.seed),
         )
 
+        history_context = HistoryContextBuilder().build(context)
+        context.notes.extend(history_context.notes)
+        context.modifiers = EventAwareGenerationResolver().resolve(context, history_context)
+
         DemographicsGenerator().ensure_races(self._social_service, context)
         OccupationAllocator().ensure_occupations(self._social_service, context)
         ContinentGenerator().generate(self._hierarchy_service, context)
@@ -50,6 +57,7 @@ class WorldGenerationService:
         SettlementGenerator().generate(self._hierarchy_service, context)
         NpcGenerator().generate(self._social_service, context)
         RelationshipSeedGenerator().generate(self._social_service, context)
+        NarrativeSeedBuilder().build(context)
 
         counts = {
             "continents": context.counts.get("continents", 0),
@@ -60,11 +68,19 @@ class WorldGenerationService:
             "points_of_interest": context.counts.get("points_of_interest", 0),
             "npcs": context.counts.get("npcs", 0),
             "relationships": context.counts.get("relationships", 0),
+            "event_footprints": len(context.modifiers.event_footprints),
+            "dm_hooks": context.counts.get("dm_hooks", 0),
         }
         notes = [
             f"Catalog references seeded: races={len(context.race_refs)}, occupations={len(context.occupation_refs)}",
+            f"Event footprints applied: {len(context.modifiers.event_footprints)}",
             "Generation completed through application/repository services.",
+            *context.notes,
         ]
+        for settlement_ref in context.settlement_refs:
+            hooks = context.settlement_hooks.get(settlement_ref, [])
+            if hooks:
+                context.increment("dm_hooks", len(hooks))
         return GenerationRunSummary(
             world_ref=request.world_ref,
             seed_used=settings.seed,

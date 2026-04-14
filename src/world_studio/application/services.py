@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ from world_studio.domain.world import (
 )
 from world_studio.generation.generation_models import GenerationRequest, GenerationRunSummary
 from world_studio.generation.generation_service import (
+    parse_event_seed_inputs,
     WorldGenerationOrchestrator,
     generate_with_payload,
 )
@@ -529,12 +531,36 @@ class GenerationAppService:
         world_ref: str,
         payload: dict[str, object],
     ) -> GenerationRunSummary:
+        normalized_payload = dict(payload)
+        for payload_key in ("event_inputs", "historical_inputs"):
+            raw_value = normalized_payload.get(payload_key)
+            if isinstance(raw_value, str):
+                text = raw_value.strip()
+                if text:
+                    try:
+                        decoded = json.loads(text)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(f"Invalid {payload_key} JSON: {exc.msg}") from exc
+                    normalized_payload[payload_key] = decoded
+                else:
+                    normalized_payload[payload_key] = []
+            elif raw_value is None:
+                normalized_payload[payload_key] = []
+
+        normalized_payload["event_inputs"] = parse_event_seed_inputs(
+            normalized_payload.get("event_inputs"),
+            stage="active",
+        )
+        normalized_payload["historical_inputs"] = parse_event_seed_inputs(
+            normalized_payload.get("historical_inputs"),
+            stage="historical",
+        )
         return generate_with_payload(
             world_service=self._world_service,
             hierarchy_service=self._hierarchy_service,
             social_service=self._social_service,
             world_ref=world_ref,
-            payload=payload,
+            payload=normalized_payload,
         )
 
 

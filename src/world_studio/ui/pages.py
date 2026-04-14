@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTabWidget,
     QTextEdit,
+    QPlainTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -878,6 +879,26 @@ class GenerationPage(QWidget):
 
         layout.addWidget(settings)
 
+        event_box = QGroupBox("Event DSL / History Context (optional JSON)")
+        event_layout = QFormLayout(event_box)
+        self._event_inputs_json = QPlainTextEdit()
+        self._event_inputs_json.setPlaceholderText(
+            '[{"name":"Mineral Discovery","scope":"region","target_ref":"reg-1",'
+            '"effects":[{"effect_type":"resource","magnitude":0.4},'
+            '{"effect_type":"migration","magnitude":0.3}],'
+            '"chained":[{"effect_type":"occupation_trade","magnitude":0.2}]}]'
+        )
+        self._event_inputs_json.setFixedHeight(120)
+        self._historical_inputs_json = QPlainTextEdit()
+        self._historical_inputs_json.setPlaceholderText(
+            '[{"name":"Border War","scope":"kingdom","target_ref":"kng-1",'
+            '"effects":[{"effect_type":"conflict","magnitude":0.35}]}]'
+        )
+        self._historical_inputs_json.setFixedHeight(100)
+        event_layout.addRow("Active Events", self._event_inputs_json)
+        event_layout.addRow("Historical Events", self._historical_inputs_json)
+        layout.addWidget(event_box)
+
         run_row = QHBoxLayout()
         run_button = QPushButton("Generate Initial World State")
         run_button.clicked.connect(self._run_generation)
@@ -937,6 +958,10 @@ class GenerationPage(QWidget):
                         self._occupation_variance.text(), "Occupation Variance"
                     ),
                     "auto_seed_catalogs": self._auto_seed_catalogs.isChecked(),
+                    "event_inputs": self._parse_json_list(self._event_inputs_json.toPlainText()),
+                    "historical_inputs": self._parse_json_list(
+                        self._historical_inputs_json.toPlainText()
+                    ),
                 },
             )
         except ValueError as exc:
@@ -980,6 +1005,23 @@ class GenerationPage(QWidget):
         if not text:
             return None
         return int(text)
+
+    @staticmethod
+    def _parse_json_list(raw: str) -> list[dict[str, object]]:
+        import json
+
+        text = raw.strip()
+        if not text:
+            return []
+        value = json.loads(text)
+        if not isinstance(value, list):
+            raise ValueError("Event JSON inputs must be a list.")
+        normalized: list[dict[str, object]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError("Each event JSON entry must be an object.")
+            normalized.append(item)
+        return normalized
 
 
 class SimulationPage(QWidget):

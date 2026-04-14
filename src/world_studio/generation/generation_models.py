@@ -3,6 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from random import Random
 
+from world_studio.events.event_dsl_models import EventSeedInput
+from world_studio.generation.generation_modifiers import GenerationModifierBundle
+
+
+@dataclass(frozen=True)
+class EventChainTemplateInput:
+    ext_ref: str
+    trigger_effect: str
+    chained_effects: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class GenerationSettings:
@@ -17,6 +27,10 @@ class GenerationSettings:
     relationship_density: float = 0.08
     lock_generated_political: bool = False
     lock_generated_leaders: bool = False
+    event_inputs: tuple[EventSeedInput, ...] = ()
+    historical_event_inputs: tuple[EventSeedInput, ...] = ()
+    event_chain_templates: tuple[EventChainTemplateInput, ...] = ()
+    world_tags: tuple[str, ...] = ()
 
     def normalized(self) -> "GenerationSettings":
         min_npcs = max(1, self.npcs_per_settlement_min)
@@ -33,6 +47,10 @@ class GenerationSettings:
             relationship_density=min(max(self.relationship_density, 0.0), 1.0),
             lock_generated_political=self.lock_generated_political,
             lock_generated_leaders=self.lock_generated_leaders,
+            event_inputs=self.event_inputs,
+            historical_event_inputs=self.historical_event_inputs,
+            event_chain_templates=self.event_chain_templates,
+            world_tags=self.world_tags,
         )
 
 
@@ -48,6 +66,7 @@ class GenerationRunSummary:
     seed_used: int
     counts: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    event_footprints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -70,6 +89,15 @@ class GenerationContext:
 
     counts: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    modifiers: GenerationModifierBundle = field(default_factory=GenerationModifierBundle)
+    settlement_themes: dict[str, str] = field(default_factory=dict)
+    settlement_tensions: dict[str, str] = field(default_factory=dict)
+    settlement_hooks: dict[str, list[str]] = field(default_factory=dict)
+    settlement_tags: dict[str, list[str]] = field(default_factory=dict)
+    region_ref_by_settlement: dict[str, str] = field(default_factory=dict)
+    kingdom_ref_by_region: dict[str, str] = field(default_factory=dict)
+    continent_ref_by_empire: dict[str, str] = field(default_factory=dict)
+    empire_ref_by_kingdom: dict[str, str] = field(default_factory=dict)
 
     def increment(self, key: str, amount: int = 1) -> None:
         self.counts[key] = self.counts.get(key, 0) + amount

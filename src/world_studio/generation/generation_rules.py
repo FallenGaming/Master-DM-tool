@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from random import Random
 
 from world_studio.domain.enums import RelationshipType, SettlementType
-
 CONTINENT_NAMES: tuple[str, ...] = (
     "Aurelia",
     "Nordreach",
@@ -217,3 +216,20 @@ def choose_governing_style(rng: Random) -> str:
 
 def pick_settlement_type(rng: Random) -> SettlementType:
     return weighted_choice(rng, SETTLEMENT_SIZE_WEIGHTS)
+
+
+def apply_population_multiplier(base_value: int, multiplier: float) -> int:
+    return max(20, int(round(base_value * multiplier)))
+
+
+def choose_weighted_occupation(
+    rng: Random,
+    weighted_occupations: Sequence[tuple[str, float]],
+) -> str:
+    return weighted_choice(rng, weighted_occupations)
+
+
+def clamp_relationship_density(value: float) -> float:
+    return min(max(value, 0.01), 0.95)
+
+

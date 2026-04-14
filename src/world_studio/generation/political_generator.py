@@ -11,7 +11,9 @@ from world_studio.generation.generation_rules import (
 
 class PoliticalGenerator:
     def generate(self, hierarchy_service: object, context: GenerationContext) -> None:
+        world_bias = context.modifiers.for_world().safety_delta
         for continent_ref in context.continent_refs:
+            continent_bias = context.modifiers.for_continent(continent_ref).prosperity_delta
             for emp_index in range(context.settings.empires_per_continent):
                 emp_name = unique_name(
                     context.rng,
@@ -32,6 +34,7 @@ class PoliticalGenerator:
                 context.empire_refs.append(empire.ext_ref)
                 context.increment("empires")
 
+                stability_bias = max(-0.25, min(0.25, (world_bias + continent_bias) * 0.35))
                 for k_index in range(context.settings.kingdoms_per_empire):
                     k_name = unique_name(
                         context.rng,
@@ -45,7 +48,16 @@ class PoliticalGenerator:
                         {
                             "name": k_name,
                             "empire_ref": empire.ext_ref,
-                            "stability_index": round(context.rng.uniform(0.35, 0.9), 2),
+                            "stability_index": round(
+                                max(
+                                    0.05,
+                                    min(
+                                        0.99,
+                                        context.rng.uniform(0.35, 0.9) + stability_bias,
+                                    ),
+                                ),
+                                2,
+                            ),
                             "is_locked": context.settings.lock_generated_political,
                         },
                     )
