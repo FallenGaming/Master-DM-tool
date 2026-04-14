@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from world_studio.bootstrap import ServiceContainer
 from world_studio.ui.pages import (
     DashboardPage,
+    HierarchyEditorPage,
     ImportExportPage,
     MapPage,
     SimulationPage,
@@ -37,6 +38,9 @@ class MainWindow(QMainWindow):
         self._pages = {
             "Dashboard": DashboardPage(container.world_service),
             "World Browser": WorldBrowserPage(container.world_service),
+            "Hierarchy Editor": HierarchyEditorPage(
+                container.world_service, container.hierarchy_service
+            ),
             "Simulation": SimulationPage(container.world_service, container.simulation_service),
             "Import/Export": ImportExportPage(container.world_service, container.import_export_service),
             "Map": MapPage(),
