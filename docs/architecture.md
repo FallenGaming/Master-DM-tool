@@ -288,6 +288,18 @@ Goal:
 Goal:
 - Complete CRUD repositories for full hierarchy and base editors in UI.
 
+Status:
+- implemented hierarchy CRUD repositories and services for:
+  - continents
+  - empires
+  - kingdoms
+  - regions
+  - settlement nodes
+  - points of interest
+  - route connections
+- implemented reusable tabbed hierarchy editor UI with create/update/delete workflows.
+- added automated tests for hierarchy repositories and services.
+
 ### Phase 3
 Goal:
 - Rich NPC/relationship models and editors with lock/override semantics.

@@ -22,3 +22,15 @@ See [docs/architecture.md](docs/architecture.md) for:
 - simulation and event engine design
 - node map design
 - phased implementation roadmap
+
+## Current implemented slices
+
+- Phase 1: architecture baseline, migrations, world CRUD, shell UI, JSON/PDF export adapters
+- Phase 2: full hierarchy CRUD services/repositories and a tabbed hierarchy editor for:
+  - continents
+  - empires
+  - kingdoms
+  - regions
+  - settlements
+  - points of interest
+  - routes
