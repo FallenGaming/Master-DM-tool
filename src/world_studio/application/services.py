@@ -22,6 +22,11 @@ from world_studio.domain.world import (
     SettlementNode,
     World,
 )
+from world_studio.generation.generation_models import GenerationRequest, GenerationRunSummary
+from world_studio.generation.generation_service import (
+    WorldGenerationOrchestrator,
+    generate_with_payload,
+)
 from world_studio.infrastructure.json_io import JsonWorldCodec
 from world_studio.infrastructure.pdf_export import PdfExporter
 
@@ -500,6 +505,37 @@ class SocialService:
         if entity is None:
             raise ValueError(f"{label} does not exist.")
         return entity
+
+
+class GenerationAppService:
+    def __init__(
+        self,
+        world_service: WorldService,
+        hierarchy_service: HierarchyService,
+        social_service: SocialService,
+        orchestrator: WorldGenerationOrchestrator | None = None,
+    ) -> None:
+        self._world_service = world_service
+        self._hierarchy_service = hierarchy_service
+        self._social_service = social_service
+        self._orchestrator = orchestrator or WorldGenerationOrchestrator()
+        self._orchestrator.bind(world_service, hierarchy_service, social_service)
+
+    def generate(self, request: GenerationRequest) -> GenerationRunSummary:
+        return self._orchestrator.generate(request)
+
+    def generate_initial_state(
+        self,
+        world_ref: str,
+        payload: dict[str, object],
+    ) -> GenerationRunSummary:
+        return generate_with_payload(
+            world_service=self._world_service,
+            hierarchy_service=self._hierarchy_service,
+            social_service=self._social_service,
+            world_ref=world_ref,
+            payload=payload,
+        )
 
 
 class ImportExportService:

@@ -38,3 +38,10 @@ See [docs/architecture.md](docs/architecture.md) for:
   - social repository CRUD for races/subraces/occupations/traits/NPCs/relationships
   - `SocialService` lock enforcement with explicit override path
   - dedicated "NPCs & Relationships" UI page with editor workflows
+- Phase 4 (initial generation slice): configurable auto-population pipeline for initial world state, including:
+  - modular generation subsystem under `src/world_studio/generation`
+  - world hierarchy generation (continents/empires/kingdoms/regions/settlements/POIs/routes)
+  - race + occupation catalog seeding
+  - NPC generation with demographic + occupation assignment
+  - relationship seeding for simulation-ready social graph initialization
+  - dedicated "Generation" page that triggers generation via application-layer services

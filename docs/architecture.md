@@ -324,6 +324,19 @@ Status:
 Goal:
 - Simulation pipeline passes, preview support, run logging, result inspection.
 
+Status (generation subsystem delivered in this phase):
+- implemented modular initial-state generation subsystem under `world_studio.generation`:
+  - configuration and result models
+  - deterministic seeded rules and naming support
+  - continent/political/region/settlement generators
+  - demographics + occupation allocation + NPC generation
+  - relationship seeding
+  - orchestration service for full world auto-population
+- implemented `GenerationAppService` in the application layer and container wiring.
+- integrated generation trigger UI page using application services only (no UI-embedded generation logic).
+- generated output persists through existing hierarchy/social services, remaining lock/override compatible and simulation-ready.
+- added integration tests validating hierarchy + social graph generation and lock override compatibility.
+
 ### Phase 5
 Goal:
 - Event DSL editor, event execution graph, chained consequences.

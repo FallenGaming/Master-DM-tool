@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from world_studio.application.services import (
+    GenerationAppService,
     HierarchyService,
     ImportExportService,
     SocialService,
@@ -815,6 +816,170 @@ class NpcRelationshipPage(QWidget):
 
     def _set_status(self, message: str) -> None:
         self._status.setText(message)
+
+
+class GenerationPage(QWidget):
+    def __init__(
+        self,
+        world_service: WorldService,
+        generation_service: GenerationAppService,
+    ) -> None:
+        super().__init__()
+        self._world_service = world_service
+        self._generation_service = generation_service
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("World Auto-Population & Generation"))
+
+        world_row = QHBoxLayout()
+        self._world_ref_input = QLineEdit()
+        self._world_ref_input.setPlaceholderText("world ext_ref")
+        world_row.addWidget(QLabel("World Ref"))
+        world_row.addWidget(self._world_ref_input)
+        layout.addLayout(world_row)
+
+        settings = QGroupBox("Generation Settings")
+        settings_form = QFormLayout(settings)
+        self._seed = QLineEdit()
+        self._seed.setPlaceholderText("optional integer seed")
+        self._continents = QLineEdit("2")
+        self._empires = QLineEdit("2")
+        self._kingdoms = QLineEdit("5")
+        self._regions = QLineEdit("10")
+        self._settlement_density = QLineEdit("0.7")
+        self._target_population = QLineEdit("1200")
+        self._npcs_per_100 = QLineEdit("2.0")
+        self._relationship_density = QLineEdit("0.08")
+        self._min_settlements_region = QLineEdit("1")
+        self._max_settlements_region = QLineEdit("4")
+        self._race_mode = QComboBox()
+        self._race_mode.addItems(["hardcoded_only", "custom_only", "mixed"])
+        self._size_tendency = QComboBox()
+        self._size_tendency.addItems(["hamlet", "village", "town", "city", "mixed"])
+        self._occupation_variance = QLineEdit("0.2")
+        self._auto_seed_catalogs = QCheckBox("Auto-seed default races and occupations")
+        self._auto_seed_catalogs.setChecked(True)
+
+        settings_form.addRow("Seed", self._seed)
+        settings_form.addRow("Continents", self._continents)
+        settings_form.addRow("Empires", self._empires)
+        settings_form.addRow("Kingdoms", self._kingdoms)
+        settings_form.addRow("Regions", self._regions)
+        settings_form.addRow("Settlement Density", self._settlement_density)
+        settings_form.addRow("Target Settlement Population", self._target_population)
+        settings_form.addRow("NPCs per 100 population", self._npcs_per_100)
+        settings_form.addRow("Relationship Density", self._relationship_density)
+        settings_form.addRow("Min Settlements/Region", self._min_settlements_region)
+        settings_form.addRow("Max Settlements/Region", self._max_settlements_region)
+        settings_form.addRow("Race Usage Mode", self._race_mode)
+        settings_form.addRow("Settlement Size Tendency", self._size_tendency)
+        settings_form.addRow("Occupation Variance", self._occupation_variance)
+        settings_form.addRow("", self._auto_seed_catalogs)
+
+        layout.addWidget(settings)
+
+        run_row = QHBoxLayout()
+        run_button = QPushButton("Generate Initial World State")
+        run_button.clicked.connect(self._run_generation)
+        run_row.addWidget(run_button)
+        run_row.addStretch()
+        layout.addLayout(run_row)
+
+        self._output = QTextEdit()
+        self._output.setReadOnly(True)
+        layout.addWidget(self._output)
+
+    def _target_world_ref(self) -> str:
+        world_ref = self._world_ref_input.text().strip()
+        if world_ref:
+            return world_ref
+        worlds = self._world_service.list_worlds()
+        if worlds:
+            world_ref = worlds[0].ext_ref
+            self._world_ref_input.setText(world_ref)
+        return world_ref
+
+    def _run_generation(self) -> None:
+        world_ref = self._target_world_ref()
+        if not world_ref:
+            QMessageBox.warning(self, "Generation", "Create a world first.")
+            return
+        try:
+            result = self._generation_service.generate_initial_state(
+                world_ref,
+                {
+                    "seed": self._optional_int(self._seed.text()),
+                    "continent_count": self._required_int(self._continents.text(), "Continents"),
+                    "empire_count": self._required_int(self._empires.text(), "Empires"),
+                    "kingdom_count": self._required_int(self._kingdoms.text(), "Kingdoms"),
+                    "region_count": self._required_int(self._regions.text(), "Regions"),
+                    "settlement_density": self._required_float(
+                        self._settlement_density.text(), "Settlement Density"
+                    ),
+                    "target_settlement_population": self._required_int(
+                        self._target_population.text(), "Target Settlement Population"
+                    ),
+                    "npc_per_100_population": self._required_float(
+                        self._npcs_per_100.text(), "NPCs per 100 population"
+                    ),
+                    "relationship_density": self._required_float(
+                        self._relationship_density.text(), "Relationship Density"
+                    ),
+                    "min_settlements_per_region": self._required_int(
+                        self._min_settlements_region.text(), "Min Settlements/Region"
+                    ),
+                    "max_settlements_per_region": self._required_int(
+                        self._max_settlements_region.text(), "Max Settlements/Region"
+                    ),
+                    "race_mode": self._race_mode.currentText(),
+                    "settlement_size_tendency": self._size_tendency.currentText(),
+                    "occupation_variance": self._required_float(
+                        self._occupation_variance.text(), "Occupation Variance"
+                    ),
+                    "auto_seed_catalogs": self._auto_seed_catalogs.isChecked(),
+                },
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Generation", str(exc))
+            return
+
+        counts = "\n".join(f"- {k}: {v}" for k, v in sorted(result.counts.items()))
+        notes = "\n".join(f"- {n}" for n in result.notes) if result.notes else "- none"
+        self._output.setPlainText(
+            "\n".join(
+                [
+                    f"Generation complete for world: {result.world_ref}",
+                    f"Seed used: {result.seed_used}",
+                    "",
+                    "Created records:",
+                    counts,
+                    "",
+                    "Generation notes:",
+                    notes,
+                ]
+            )
+        )
+
+    @staticmethod
+    def _required_int(raw: str, label: str) -> int:
+        text = raw.strip()
+        if not text:
+            raise ValueError(f"{label} is required.")
+        return int(text)
+
+    @staticmethod
+    def _required_float(raw: str, label: str) -> float:
+        text = raw.strip()
+        if not text:
+            raise ValueError(f"{label} is required.")
+        return float(text)
+
+    @staticmethod
+    def _optional_int(raw: str) -> int | None:
+        text = raw.strip()
+        if not text:
+            return None
+        return int(text)
 
 
 class SimulationPage(QWidget):
