@@ -8,16 +8,31 @@ from world_studio.generation.generation_rules import (
     pick_settlement_type,
     unique_name,
 )
+from world_studio.generation.node_layout_generator import NodeLayoutGenerator
 from world_studio.generation.settlement_flavor_builder import SettlementFlavorBuilder
 
 
 class SettlementGenerator:
     def __init__(self) -> None:
         self._flavor_builder = SettlementFlavorBuilder()
+        self._layout = NodeLayoutGenerator()
 
     def generate(self, hierarchy_service: object, context: GenerationContext) -> None:
         world_mod = context.modifiers.for_world()
         for region_ref in context.region_refs:
+            center_x, center_y = context.region_centers.get(
+                region_ref,
+                (context.rng.uniform(-300.0, 300.0), context.rng.uniform(-300.0, 300.0)),
+            )
+            region_radius = context.region_radii.get(region_ref, 85.0)
+            placements = self._layout.generate_settlement_positions(
+                rng=context.rng,
+                region_ref=region_ref,
+                center_x=center_x,
+                center_y=center_y,
+                radius=region_radius,
+                settlement_count=context.settings.settlements_per_region,
+            )
             for index in range(context.settings.settlements_per_region):
                 kind = pick_settlement_type(context.rng)
                 population = choose_population(context.rng, kind)
@@ -63,13 +78,39 @@ class SettlementGenerator:
                             ),
                             2,
                         ),
-                        "x": round(context.rng.uniform(-500, 500), 2),
-                        "y": round(context.rng.uniform(-500, 500), 2),
+                        "x": placements[index][0],
+                        "y": placements[index][1],
+                        "metadata": {
+                            "map": {
+                                "level": "settlement",
+                                "cluster_id": placements[index][2],
+                                "region_ref": region_ref,
+                                "kingdom_ref": context.kingdom_ref_by_region.get(region_ref),
+                                "empire_ref": context.empire_ref_by_kingdom.get(
+                                    context.kingdom_ref_by_region.get(region_ref, "")
+                                ),
+                                "continent_ref": context.continent_ref_by_empire.get(
+                                    context.empire_ref_by_kingdom.get(
+                                        context.kingdom_ref_by_region.get(region_ref, ""),
+                                        "",
+                                    ),
+                                ),
+                                "distance_to_region_center": round(
+                                    (
+                                        (placements[index][0] - center_x) ** 2
+                                        + (placements[index][1] - center_y) ** 2
+                                    )
+                                    ** 0.5,
+                                    2,
+                                ),
+                            }
+                        },
                         "is_locked": False,
                     },
                 )
                 context.settlement_refs.append(settlement.ext_ref)
                 context.settlement_population[settlement.ext_ref] = population
+                context.region_ref_by_settlement[settlement.ext_ref] = region_ref
                 context.increment("settlements")
                 context.modifiers.settlement[settlement.ext_ref] = context.modifiers.derive_settlement_modifier(
                     region_ref,
@@ -98,14 +139,28 @@ class SettlementGenerator:
                     index,
                     POI_NAMES,
                 )
+                poi_x, poi_y = self._layout.generate_poi_position(
+                    rng=context.rng,
+                    anchor_x=placements[index][0],
+                    anchor_y=placements[index][1],
+                    spread=max(8.0, region_radius * 0.22),
+                )
                 hierarchy_service.create_point_of_interest(
                     context.world_ref,
                     {
                         "name": poi_name,
                         "region_ref": region_ref,
                         "node_type": "point_of_interest",
-                        "x": round(context.rng.uniform(-500, 500), 2),
-                        "y": round(context.rng.uniform(-500, 500), 2),
+                        "x": poi_x,
+                        "y": poi_y,
+                        "metadata": {
+                            "map": {
+                                "level": "local_poi",
+                                "cluster_id": placements[index][2],
+                                "near_settlement_ref": settlement.ext_ref,
+                                "region_ref": region_ref,
+                            }
+                        },
                         "description": "Generated landmark tied to local settlement growth.",
                         "is_locked": False,
                     },

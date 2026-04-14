@@ -66,13 +66,21 @@ def test_generation_pipeline_persists_hierarchy_and_social_graph(tmp_path: Path)
     assert result.counts["kingdoms"] == 4
     assert result.counts["regions"] == 8
     assert result.counts["settlements"] == 16
+    assert result.counts["routes"] > 0
     assert result.counts["npcs"] > 0
     assert result.counts["relationships"] > 0
 
     assert len(hierarchy_service.list_continents(world.ext_ref)) == 2
     assert len(hierarchy_service.list_settlements(world.ext_ref)) == 16
+    assert len(hierarchy_service.list_routes(world.ext_ref)) == result.counts["routes"]
     assert len(social_service.list_npcs(world.ext_ref)) == result.counts["npcs"]
     assert len(social_service.list_relationships(world.ext_ref)) == result.counts["relationships"]
+
+    regions = hierarchy_service.list_regions(world.ext_ref)
+    settlements = hierarchy_service.list_settlements(world.ext_ref)
+    assert all(isinstance(region.metadata.get("map"), dict) for region in regions)
+    assert all(isinstance(settlement.metadata.get("map"), dict) for settlement in settlements)
+    assert all("cluster_id" in settlement.metadata["map"] for settlement in settlements)
 
 
 def test_generation_lock_and_override_compatibility(tmp_path: Path) -> None:

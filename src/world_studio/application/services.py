@@ -12,7 +12,7 @@ from world_studio.data.repositories import (
 )
 from world_studio.domain.enums import NodeType, RelationshipType, SettlementType
 from world_studio.domain.population import Npc, Occupation, Race, Relationship
-from world_studio.domain.simulation import SimulationEngine, SimulationRequest, SimulationRun
+from world_studio.domain.simulation import NoOpPass, SimulationEngine, SimulationRequest, SimulationRun
 from world_studio.domain.world import (
     Continent,
     Empire,
@@ -29,6 +29,7 @@ from world_studio.generation.generation_service import (
     WorldGenerationOrchestrator,
     generate_with_payload,
 )
+from world_studio.generation.settlement_promotion_rules import MapAwareSettlementPass
 from world_studio.infrastructure.json_io import JsonWorldCodec
 from world_studio.infrastructure.pdf_export import PdfExporter
 
@@ -65,6 +66,7 @@ class HierarchyService:
             name=str(payload.get("name", "")).strip(),
             climate_summary=str(payload.get("climate_summary", "")).strip(),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         if not continent.name:
             raise ValueError("Continent name is required.")
@@ -75,6 +77,8 @@ class HierarchyService:
         continent.name = str(payload.get("name", continent.name)).strip() or continent.name
         continent.climate_summary = str(payload.get("climate_summary", continent.climate_summary)).strip()
         continent.is_locked = bool(payload.get("is_locked", continent.is_locked))
+        if "metadata" in payload:
+            continent.metadata = self._to_metadata(payload.get("metadata"))
         return self._hierarchy_repository.upsert_continent(continent)
 
     def delete_continent(self, ext_ref: str) -> None:
@@ -95,6 +99,7 @@ class HierarchyService:
             name=str(payload.get("name", "")).strip(),
             governing_style=str(payload.get("governing_style", "")).strip(),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         if not empire.name:
             raise ValueError("Empire name is required.")
@@ -106,6 +111,8 @@ class HierarchyService:
         empire.continent_ref = self._optional_text(payload.get("continent_ref")) or None
         empire.governing_style = str(payload.get("governing_style", empire.governing_style)).strip()
         empire.is_locked = bool(payload.get("is_locked", empire.is_locked))
+        if "metadata" in payload:
+            empire.metadata = self._to_metadata(payload.get("metadata"))
         return self._hierarchy_repository.upsert_empire(empire)
 
     def delete_empire(self, ext_ref: str) -> None:
@@ -126,6 +133,7 @@ class HierarchyService:
             name=str(payload.get("name", "")).strip(),
             stability_index=self._to_float(payload.get("stability_index"), 0.5),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         if not kingdom.name:
             raise ValueError("Kingdom name is required.")
@@ -137,6 +145,8 @@ class HierarchyService:
         kingdom.empire_ref = self._optional_text(payload.get("empire_ref")) or None
         kingdom.stability_index = self._to_float(payload.get("stability_index"), kingdom.stability_index)
         kingdom.is_locked = bool(payload.get("is_locked", kingdom.is_locked))
+        if "metadata" in payload:
+            kingdom.metadata = self._to_metadata(payload.get("metadata"))
         return self._hierarchy_repository.upsert_kingdom(kingdom)
 
     def delete_kingdom(self, ext_ref: str) -> None:
@@ -157,6 +167,7 @@ class HierarchyService:
             name=str(payload.get("name", "")).strip(),
             biome=str(payload.get("biome", "")).strip(),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         if not region.name:
             raise ValueError("Region name is required.")
@@ -168,6 +179,8 @@ class HierarchyService:
         region.kingdom_ref = self._optional_text(payload.get("kingdom_ref")) or None
         region.biome = str(payload.get("biome", region.biome)).strip()
         region.is_locked = bool(payload.get("is_locked", region.is_locked))
+        if "metadata" in payload:
+            region.metadata = self._to_metadata(payload.get("metadata"))
         return self._hierarchy_repository.upsert_region(region)
 
     def delete_region(self, ext_ref: str) -> None:
@@ -193,6 +206,7 @@ class HierarchyService:
             x=self._to_float(payload.get("x"), 0.0),
             y=self._to_float(payload.get("y"), 0.0),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         if not settlement.name:
             raise ValueError("Settlement name is required.")
@@ -211,6 +225,8 @@ class HierarchyService:
         settlement.x = self._to_float(payload.get("x"), settlement.x)
         settlement.y = self._to_float(payload.get("y"), settlement.y)
         settlement.is_locked = bool(payload.get("is_locked", settlement.is_locked))
+        if "metadata" in payload:
+            settlement.metadata = self._to_metadata(payload.get("metadata"))
         return self._hierarchy_repository.upsert_settlement(settlement)
 
     def delete_settlement(self, ext_ref: str) -> None:
@@ -236,6 +252,7 @@ class HierarchyService:
             y=self._to_float(payload.get("y"), 0.0),
             description=str(payload.get("description", "")).strip(),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         if not poi.name:
             raise ValueError("Point of interest name is required.")
@@ -252,6 +269,8 @@ class HierarchyService:
         poi.y = self._to_float(payload.get("y"), poi.y)
         poi.description = str(payload.get("description", poi.description)).strip()
         poi.is_locked = bool(payload.get("is_locked", poi.is_locked))
+        if "metadata" in payload:
+            poi.metadata = self._to_metadata(payload.get("metadata"))
         return self._hierarchy_repository.upsert_point_of_interest(poi)
 
     def delete_point_of_interest(self, ext_ref: str) -> None:
@@ -274,6 +293,7 @@ class HierarchyService:
             route_type=str(payload.get("route_type", "road")).strip() or "road",
             travel_cost=self._to_float(payload.get("travel_cost"), 1.0),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         if not route.name or not route.source_ref or not route.target_ref:
             raise ValueError("Route requires name, source_ref, and target_ref.")
@@ -287,6 +307,8 @@ class HierarchyService:
         route.route_type = str(payload.get("route_type", route.route_type)).strip() or route.route_type
         route.travel_cost = self._to_float(payload.get("travel_cost"), route.travel_cost)
         route.is_locked = bool(payload.get("is_locked", route.is_locked))
+        if "metadata" in payload:
+            route.metadata = self._to_metadata(payload.get("metadata"))
         return self._hierarchy_repository.upsert_route(route)
 
     def delete_route(self, ext_ref: str) -> None:
@@ -312,6 +334,12 @@ class HierarchyService:
         return float(value)
 
     @staticmethod
+    def _to_metadata(value: object | None) -> dict[str, object]:
+        if isinstance(value, dict):
+            return dict(value)
+        return {}
+
+    @staticmethod
     def _require_entity(entity: object | None, label: str) -> object:
         if entity is None:
             raise ValueError(f"{label} does not exist.")
@@ -319,9 +347,24 @@ class HierarchyService:
 
 
 class SimulationService:
-    def __init__(self, world_repository: WorldRepository) -> None:
+    def __init__(
+        self,
+        world_repository: WorldRepository,
+        hierarchy_repository: HierarchyRepository,
+    ) -> None:
         self._world_repository = world_repository
-        self._engine = SimulationEngine()
+        self._engine = SimulationEngine(
+            [
+                NoOpPass("precheck", "Validated locks, snapshots, and active rules."),
+                NoOpPass("demography", "Aging and mortality pass pending phase 4."),
+                NoOpPass("economy", "Occupation/economy pass pending phase 4."),
+                NoOpPass("migration", "Migration route scoring pass pending phase 4."),
+                MapAwareSettlementPass(hierarchy_repository),
+                NoOpPass("relationships", "Relationship drift pass pending phase 4."),
+                NoOpPass("events", "Event resolution pass pending phase 5."),
+                NoOpPass("post", "Run summary and audit persistence pending phase 4."),
+            ]
+        )
 
     def simulate(self, request: SimulationRequest) -> SimulationRun:
         if self._world_repository.get_world(request.world_ref) is None:
@@ -388,6 +431,7 @@ class SocialService:
             wealth_index=self._to_float(payload.get("wealth_index"), 0.5),
             notes=str(payload.get("notes", "")).strip(),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         if not npc.display_name:
             raise ValueError("NPC display_name is required.")
@@ -408,6 +452,8 @@ class SocialService:
         npc.notes = str(payload.get("notes", npc.notes)).strip()
         if "is_locked" in payload:
             npc.is_locked = bool(payload["is_locked"])
+        if "metadata" in payload:
+            npc.metadata = self._to_metadata(payload.get("metadata"))
         return self._social_repository.upsert_npc(npc)
 
     def delete_npc(self, ext_ref: str, *, force: bool = False) -> None:
@@ -437,6 +483,7 @@ class SocialService:
             weight=self._to_float(payload.get("weight"), 0.0),
             history=self._parse_history(payload.get("history", "")),
             is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
         )
         return self._social_repository.upsert_relationship(relationship)
 
@@ -462,6 +509,8 @@ class SocialService:
             relationship.history = self._parse_history(payload.get("history"))
         if "is_locked" in payload:
             relationship.is_locked = bool(payload["is_locked"])
+        if "metadata" in payload:
+            relationship.metadata = self._to_metadata(payload.get("metadata"))
         return self._social_repository.upsert_relationship(relationship)
 
     def delete_relationship(self, ext_ref: str, *, force: bool = False) -> None:
@@ -490,6 +539,12 @@ class SocialService:
         if value is None or value == "":
             return default
         return float(value)
+
+    @staticmethod
+    def _to_metadata(value: object | None) -> dict[str, object]:
+        if isinstance(value, dict):
+            return dict(value)
+        return {}
 
     @staticmethod
     def _parse_history(value: object | None) -> list[str]:

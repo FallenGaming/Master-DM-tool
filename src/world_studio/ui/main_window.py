@@ -49,7 +49,7 @@ class MainWindow(QMainWindow):
             ),
             "Simulation": SimulationPage(container.world_service, container.simulation_service),
             "Import/Export": ImportExportPage(container.world_service, container.import_export_service),
-            "Map": MapPage(),
+            "Map": MapPage(container.world_service, container.multi_scale_map_service),
         }
 
         for title, widget in self._pages.items():

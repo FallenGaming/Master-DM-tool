@@ -32,6 +32,7 @@ class PoliticalGenerator:
                     },
                 )
                 context.empire_refs.append(empire.ext_ref)
+                context.continent_ref_by_empire[empire.ext_ref] = continent_ref
                 context.increment("empires")
 
                 stability_bias = max(-0.25, min(0.25, (world_bias + continent_bias) * 0.35))
@@ -62,4 +63,5 @@ class PoliticalGenerator:
                         },
                     )
                     context.kingdom_refs.append(kingdom.ext_ref)
+                    context.empire_ref_by_kingdom[kingdom.ext_ref] = empire.ext_ref
                     context.increment("kingdoms")

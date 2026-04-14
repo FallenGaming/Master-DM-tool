@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,6 +16,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QGraphicsScene,
+    QGraphicsView,
     QTabWidget,
     QTextEdit,
     QPlainTextEdit,
@@ -30,6 +33,8 @@ from world_studio.application.services import (
     SimulationService,
     WorldService,
 )
+from world_studio.maps.node_positioning_models import MapScale
+from world_studio.maps.multi_scale_map_service import MultiScaleMapService
 from world_studio.domain.enums import NodeType, RelationshipType, SettlementType, SimulationStep
 from world_studio.domain.simulation import SimulationRequest
 from world_studio.domain.world import World
@@ -1138,14 +1143,112 @@ class ImportExportPage(QWidget):
 
 
 class MapPage(QWidget):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        world_service: WorldService,
+        multi_scale_map_service: MultiScaleMapService,
+    ) -> None:
         super().__init__()
+        self._world_service = world_service
+        self._multi_scale_map_service = multi_scale_map_service
+        self._scene = QGraphicsScene()
+
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Node Map View"))
-        placeholder = QLabel(
-            "Graph rendering foundation is reserved for phase 6.\n"
-            "This page is intentionally in place for stable navigation contracts."
+
+        controls = QHBoxLayout()
+        self._world_ref_input = QLineEdit()
+        self._world_ref_input.setPlaceholderText("world ext_ref")
+        self._focus_ref_input = QLineEdit()
+        self._focus_ref_input.setPlaceholderText("optional focus node ref")
+        self._scale_input = QComboBox()
+        self._scale_input.addItems([scale.value for scale in MapScale])
+        refresh_button = QPushButton("Render Map")
+        refresh_button.clicked.connect(self.refresh)
+
+        controls.addWidget(QLabel("World Ref"))
+        controls.addWidget(self._world_ref_input, stretch=2)
+        controls.addWidget(QLabel("Scale"))
+        controls.addWidget(self._scale_input, stretch=1)
+        controls.addWidget(QLabel("Focus Ref"))
+        controls.addWidget(self._focus_ref_input, stretch=2)
+        controls.addWidget(refresh_button)
+        layout.addLayout(controls)
+
+        self._view = QGraphicsView(self._scene)
+        self._view.setRenderHints(self._view.renderHints())
+        self._view.setMinimumHeight(380)
+        layout.addWidget(self._view)
+
+        self._summary = QTextEdit()
+        self._summary.setReadOnly(True)
+        self._summary.setFixedHeight(180)
+        layout.addWidget(self._summary)
+
+    def refresh(self) -> None:
+        world_ref = self._world_ref_input.text().strip()
+        if not world_ref:
+            worlds = self._world_service.list_worlds()
+            if not worlds:
+                self._summary.setPlainText("Create a world first.")
+                return
+            world_ref = worlds[0].ext_ref
+            self._world_ref_input.setText(world_ref)
+
+        scale = MapScale(self._scale_input.currentText())
+        focus_ref = self._focus_ref_input.text().strip() or None
+        projection = self._multi_scale_map_service.project(
+            world_ref,
+            scale=scale,
+            focus_ref=focus_ref,
         )
-        placeholder.setWordWrap(True)
-        layout.addWidget(placeholder)
-        layout.addStretch()
+        self._render_projection(projection)
+
+    def _render_projection(self, projection: object) -> None:
+        self._scene.clear()
+        nodes = projection.nodes
+        edges = projection.edges
+        node_by_ref = {node.ext_ref: node for node in nodes}
+
+        route_pen = QPen(Qt.GlobalColor.darkGray)
+        route_pen.setWidthF(1.2)
+        contain_pen = QPen(Qt.GlobalColor.lightGray)
+        contain_pen.setStyle(Qt.PenStyle.DashLine)
+        contain_pen.setWidthF(0.8)
+
+        for edge in edges:
+            source = node_by_ref.get(edge.source_ref)
+            target = node_by_ref.get(edge.target_ref)
+            if source is None or target is None:
+                continue
+            pen = contain_pen if edge.route_type == "contains" else route_pen
+            self._scene.addLine(source.x, source.y, target.x, target.y, pen)
+
+        for node in nodes:
+            radius = max(3.0, node.size_hint * 4.2)
+            self._scene.addEllipse(
+                node.x - radius,
+                node.y - radius,
+                radius * 2,
+                radius * 2,
+            )
+            self._scene.addText(node.label).setPos(node.x + radius + 1.0, node.y - radius)
+
+        self._view.fitInView(self._scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        local_nodes = sum(1 for node in nodes if str(node.metadata.get("level")) == MapScale.LOCAL.value)
+        summary_lines = [
+            f"World: {projection.world_ref}",
+            f"Nodes: {len(nodes)}  Edges: {len(edges)}",
+            f"Local nodes shown: {local_nodes}",
+        ]
+        top_nodes = sorted(nodes, key=lambda node: node.size_hint, reverse=True)[:8]
+        if top_nodes:
+            summary_lines.append("")
+            summary_lines.append("Top nodes:")
+            summary_lines.extend(
+                [
+                    f"- {node.label} [{node.node_type}] ({node.x:.1f}, {node.y:.1f})"
+                    for node in top_nodes
+                ]
+            )
+        self._summary.setPlainText("\n".join(summary_lines))

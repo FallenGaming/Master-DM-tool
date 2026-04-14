@@ -15,6 +15,8 @@ from world_studio.data.database import Database
 from world_studio.data.repositories import HierarchyRepository, SocialRepository, WorldRepository
 from world_studio.infrastructure.json_io import JsonWorldCodec
 from world_studio.infrastructure.pdf_export import PdfExporter
+from world_studio.maps.map_projection_service import MapProjectionService
+from world_studio.maps.multi_scale_map_service import MultiScaleMapService
 
 
 @dataclass
@@ -29,6 +31,7 @@ class ServiceContainer:
     social_service: SocialService
     generation_service: GenerationAppService
     simulation_service: SimulationService
+    multi_scale_map_service: MultiScaleMapService
     import_export_service: ImportExportService
 
 
@@ -42,7 +45,8 @@ def build_container() -> ServiceContainer:
     hierarchy_service = HierarchyService(hierarchy_repository)
     social_service = SocialService(social_repository)
     generation_service = GenerationAppService(world_service, hierarchy_service, social_service)
-    simulation_service = SimulationService(world_repository)
+    simulation_service = SimulationService(world_repository, hierarchy_repository)
+    multi_scale_map_service = MultiScaleMapService(MapProjectionService(hierarchy_service))
     import_export_service = ImportExportService(
         world_repository=world_repository,
         json_codec=JsonWorldCodec(),
@@ -60,5 +64,6 @@ def build_container() -> ServiceContainer:
         social_service=social_service,
         generation_service=generation_service,
         simulation_service=simulation_service,
+        multi_scale_map_service=multi_scale_map_service,
         import_export_service=import_export_service,
     )

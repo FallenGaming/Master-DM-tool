@@ -11,7 +11,7 @@ class MapNodeView:
     x: float
     y: float
     size_hint: float = 1.0
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -21,7 +21,7 @@ class MapEdgeView:
     target_ref: str
     route_type: str
     weight: float = 1.0
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
