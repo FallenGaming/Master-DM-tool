@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import Qt
@@ -8,6 +9,7 @@ from PySide6.QtGui import QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -26,9 +28,14 @@ from PySide6.QtWidgets import (
 )
 
 from world_studio.application.services import (
+    PDF_PACK_DM,
+    PDF_PACK_PLAYER,
+    PDF_PACK_SUMMARY,
     GenerationAppService,
     HierarchyService,
     ImportExportService,
+    SnapshotCompareResult,
+    SnapshotRestoreSummary,
     SocialService,
     SimulationService,
     WorldService,
@@ -1091,21 +1098,70 @@ class ImportExportPage(QWidget):
         layout = QVBoxLayout(self)
         self._world_ref_input = QLineEdit()
         self._world_ref_input.setPlaceholderText("world ext_ref")
+        self._import_path_input = QLineEdit()
+        self._import_path_input.setPlaceholderText("path to world json")
+        self._snapshot_name_input = QLineEdit()
+        self._snapshot_name_input.setPlaceholderText("optional snapshot name")
+        self._snapshot_ref_input = QLineEdit()
+        self._snapshot_ref_input.setPlaceholderText("snapshot ref to restore")
+        self._snapshot_base_ref_input = QLineEdit()
+        self._snapshot_base_ref_input.setPlaceholderText("base snapshot ref")
+        self._snapshot_target_ref_input = QLineEdit()
+        self._snapshot_target_ref_input.setPlaceholderText("target snapshot ref")
+        self._pdf_pack_input = QComboBox()
+        self._pdf_pack_input.addItems([PDF_PACK_SUMMARY, PDF_PACK_DM, PDF_PACK_PLAYER])
         self._output = QTextEdit()
         self._output.setReadOnly(True)
 
         export_json = QPushButton("Export World JSON")
         export_json.clicked.connect(self._export_json)
+        import_json = QPushButton("Import World JSON")
+        import_json.clicked.connect(self._import_json)
+        browse_import = QPushButton("Browse")
+        browse_import.clicked.connect(self._browse_import)
+
+        create_snapshot = QPushButton("Create Snapshot")
+        create_snapshot.clicked.connect(self._create_snapshot)
+        list_snapshots = QPushButton("List Snapshots")
+        list_snapshots.clicked.connect(self._list_snapshots)
+        compare_snapshots = QPushButton("Compare Snapshots")
+        compare_snapshots.clicked.connect(self._compare_snapshots)
+        restore_snapshot = QPushButton("Restore Snapshot")
+        restore_snapshot.clicked.connect(self._restore_snapshot)
+
         export_pdf = QPushButton("Export World PDF")
         export_pdf.clicked.connect(self._export_pdf)
 
+        import_row = QHBoxLayout()
+        import_row.addWidget(self._import_path_input)
+        import_row.addWidget(browse_import)
+        import_row.addWidget(import_json)
+
+        snapshot_form = QFormLayout()
+        snapshot_form.addRow("Snapshot Name", self._snapshot_name_input)
+        snapshot_form.addRow("Restore Ref", self._snapshot_ref_input)
+        snapshot_form.addRow("Compare Base", self._snapshot_base_ref_input)
+        snapshot_form.addRow("Compare Target", self._snapshot_target_ref_input)
+
+        snapshot_buttons = QHBoxLayout()
+        snapshot_buttons.addWidget(create_snapshot)
+        snapshot_buttons.addWidget(list_snapshots)
+        snapshot_buttons.addWidget(compare_snapshots)
+        snapshot_buttons.addWidget(restore_snapshot)
+        snapshot_buttons.addStretch()
+
         button_row = QHBoxLayout()
         button_row.addWidget(export_json)
+        button_row.addWidget(QLabel("PDF Pack"))
+        button_row.addWidget(self._pdf_pack_input)
         button_row.addWidget(export_pdf)
         button_row.addStretch()
 
         layout.addWidget(QLabel("Import / Export"))
         layout.addWidget(self._world_ref_input)
+        layout.addLayout(import_row)
+        layout.addLayout(snapshot_form)
+        layout.addLayout(snapshot_buttons)
         layout.addLayout(button_row)
         layout.addWidget(self._output)
 
@@ -1130,16 +1186,151 @@ class ImportExportPage(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "Export", str(exc))
 
+    def _browse_import(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select world JSON",
+            str(Path.cwd()),
+            "JSON files (*.json);;All files (*)",
+        )
+        if selected:
+            self._import_path_input.setText(selected)
+
+    def _import_json(self) -> None:
+        source_text = self._import_path_input.text().strip()
+        if not source_text:
+            QMessageBox.warning(self, "Import", "Provide a JSON path first.")
+            return
+        source = Path(source_text)
+        if not source.exists():
+            QMessageBox.warning(self, "Import", f"File does not exist: {source}")
+            return
+        try:
+            world = self._import_export_service.import_world_json(source)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Import", str(exc))
+            return
+        self._world_ref_input.setText(world.ext_ref)
+        self._output.setPlainText(f"Imported world:\n- {world.name} ({world.ext_ref})")
+
+    def _create_snapshot(self) -> None:
+        world_ref = self._target_world_ref()
+        if not world_ref:
+            QMessageBox.warning(self, "Snapshot", "Create or select a world first.")
+            return
+        try:
+            snapshot = self._import_export_service.create_snapshot(
+                world_ref,
+                name=self._snapshot_name_input.text().strip() or None,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Snapshot", str(exc))
+            return
+        self._snapshot_ref_input.setText(snapshot.ext_ref)
+        self._snapshot_base_ref_input.setText(snapshot.ext_ref)
+        self._snapshot_target_ref_input.setText(snapshot.ext_ref)
+        self._output.setPlainText(
+            "\n".join(
+                [
+                    "Snapshot created:",
+                    f"- name: {snapshot.name}",
+                    f"- ref: {snapshot.ext_ref}",
+                    f"- checksum: {snapshot.checksum}",
+                ]
+            )
+        )
+
+    def _list_snapshots(self) -> None:
+        world_ref = self._target_world_ref()
+        if not world_ref:
+            QMessageBox.warning(self, "Snapshot", "Create or select a world first.")
+            return
+        snapshots = self._import_export_service.list_snapshots(world_ref)
+        if not snapshots:
+            self._output.setPlainText("No snapshots found for this world.")
+            return
+        lines = [f"Snapshots for world {world_ref}:"]
+        for item in snapshots[:30]:
+            lines.append(
+                f"- {item.name} | {item.ext_ref} | {item.created_utc.isoformat()} | {item.checksum[:12]}"
+            )
+        self._output.setPlainText("\n".join(lines))
+
+    def _compare_snapshots(self) -> None:
+        base_ref = self._snapshot_base_ref_input.text().strip()
+        target_ref = self._snapshot_target_ref_input.text().strip()
+        if not base_ref or not target_ref:
+            QMessageBox.warning(self, "Snapshot", "Provide both base and target snapshot refs.")
+            return
+        try:
+            result = self._import_export_service.compare_snapshots(base_ref, target_ref)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Snapshot", str(exc))
+            return
+        self._output.setPlainText(self._format_snapshot_compare(result))
+
+    def _restore_snapshot(self) -> None:
+        snapshot_ref = self._snapshot_ref_input.text().strip()
+        if not snapshot_ref:
+            QMessageBox.warning(self, "Snapshot", "Provide a snapshot ref to restore.")
+            return
+        try:
+            result = self._import_export_service.restore_snapshot(snapshot_ref)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Snapshot", str(exc))
+            return
+        self._world_ref_input.setText(result.world_ref)
+        self._output.setPlainText(self._format_snapshot_restore(result))
+
     def _export_pdf(self) -> None:
         world_ref = self._target_world_ref()
         if not world_ref:
             QMessageBox.warning(self, "Export", "Create a world first.")
             return
         try:
-            target = self._import_export_service.export_world_pdf(world_ref)
+            target = self._import_export_service.export_world_pdf(
+                world_ref,
+                pack_kind=self._pdf_pack_input.currentText(),
+            )
             self._output.setPlainText(f"Exported PDF:\n{target}")
         except ValueError as exc:
             QMessageBox.warning(self, "Export", str(exc))
+
+    @staticmethod
+    def _format_snapshot_compare(result: SnapshotCompareResult) -> str:
+        lines = [
+            f"Snapshot compare for world {result.world_ref}",
+            f"Base: {result.base_snapshot_ref}",
+            f"Target: {result.target_snapshot_ref}",
+            f"Total changed items: {result.total_changed}",
+            "",
+        ]
+        if not result.entity_diffs:
+            lines.append("No differences detected.")
+            return "\n".join(lines)
+        for diff in result.entity_diffs:
+            lines.append(
+                f"- {diff.entity_type}: +{diff.added} / -{diff.removed} / ~{diff.changed}"
+            )
+            if diff.sample_added_refs:
+                lines.append(f"    added: {', '.join(diff.sample_added_refs)}")
+            if diff.sample_removed_refs:
+                lines.append(f"    removed: {', '.join(diff.sample_removed_refs)}")
+            if diff.sample_changed_refs:
+                lines.append(f"    changed: {', '.join(diff.sample_changed_refs)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_snapshot_restore(result: SnapshotRestoreSummary) -> str:
+        lines = [
+            f"Restored snapshot: {result.snapshot_ref}",
+            f"World: {result.world_ref}",
+            "",
+            "Restored counts:",
+        ]
+        for key, value in sorted(result.restored_counts.items()):
+            lines.append(f"- {key}: {value}")
+        return "\n".join(lines)
 
 
 class MapPage(QWidget):

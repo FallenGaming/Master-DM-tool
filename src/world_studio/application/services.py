@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+import hashlib
 import json
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from world_studio.data.repositories import (
@@ -11,7 +14,7 @@ from world_studio.data.repositories import (
     WorldRepository,
 )
 from world_studio.domain.enums import NodeType, RelationshipType, SettlementType
-from world_studio.domain.population import Npc, Occupation, Race, Relationship
+from world_studio.domain.population import Npc, Occupation, Race, Relationship, SubRace, Trait
 from world_studio.domain.simulation import NoOpPass, SimulationEngine, SimulationRequest, SimulationRun
 from world_studio.domain.world import (
     Continent,
@@ -20,6 +23,7 @@ from world_studio.domain.world import (
     PointOfInterest,
     Region,
     RouteConnection,
+    SnapshotRecord,
     SettlementNode,
     World,
 )
@@ -619,25 +623,58 @@ class GenerationAppService:
         )
 
 
+PDF_PACK_SUMMARY = "summary"
+PDF_PACK_DM = "dm"
+PDF_PACK_PLAYER = "player"
+
+
+@dataclass(frozen=True)
+class SnapshotEntityDiff:
+    entity_type: str
+    added: int
+    removed: int
+    changed: int
+    sample_added_refs: tuple[str, ...] = ()
+    sample_removed_refs: tuple[str, ...] = ()
+    sample_changed_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SnapshotCompareResult:
+    world_ref: str
+    base_snapshot_ref: str
+    target_snapshot_ref: str
+    total_changed: int
+    entity_diffs: tuple[SnapshotEntityDiff, ...]
+
+
+@dataclass(frozen=True)
+class SnapshotRestoreSummary:
+    snapshot_ref: str
+    world_ref: str
+    restored_counts: dict[str, int]
+
+
 class ImportExportService:
     def __init__(
         self,
         world_repository: WorldRepository,
+        hierarchy_repository: HierarchyRepository,
+        social_repository: SocialRepository,
         json_codec: JsonWorldCodec,
         pdf_exporter: PdfExporter,
         exports_dir: Path,
     ) -> None:
         self._world_repository = world_repository
+        self._hierarchy_repository = hierarchy_repository
+        self._social_repository = social_repository
         self._json_codec = json_codec
         self._pdf_exporter = pdf_exporter
         self._exports_dir = exports_dir
         self._exports_dir.mkdir(parents=True, exist_ok=True)
 
     def export_world_json(self, world_ref: str) -> Path:
-        world = self._world_repository.get_world(world_ref)
-        if world is None:
-            raise ValueError(f"Unknown world: {world_ref}")
-        payload = self._json_codec.serialize_world(asdict(world))
+        payload = self._serialize_world_bundle(world_ref)
         target = self._exports_dir / f"world-{world_ref}.json"
         target.write_text(payload, encoding="utf-8")
         return target
@@ -647,10 +684,511 @@ class ImportExportService:
         world = World(**model)
         return self._world_repository.upsert_world(world)
 
-    def export_world_pdf(self, world_ref: str) -> Path:
+    def create_snapshot(self, world_ref: str, *, name: str | None = None) -> SnapshotRecord:
+        snapshot_name = (name or "").strip() or f"Snapshot {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"
+        snapshot_json = self._serialize_world_bundle(world_ref)
+        checksum = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+        snapshot = SnapshotRecord(
+            id=None,
+            ext_ref=str(uuid4()),
+            world_ref=world_ref,
+            name=snapshot_name,
+            snapshot_json=snapshot_json,
+            checksum=checksum,
+        )
+        return self._world_repository.create_snapshot(snapshot)
+
+    def list_snapshots(self, world_ref: str) -> list[SnapshotRecord]:
+        return self._world_repository.list_snapshots(world_ref)
+
+    def compare_snapshots(self, base_snapshot_ref: str, target_snapshot_ref: str) -> SnapshotCompareResult:
+        base = self._require_snapshot(base_snapshot_ref)
+        target = self._require_snapshot(target_snapshot_ref)
+        if base.world_ref != target.world_ref:
+            raise ValueError("Cannot compare snapshots from different worlds.")
+
+        base_bundle = self._json_codec.deserialize_world_bundle(base.snapshot_json)
+        target_bundle = self._json_codec.deserialize_world_bundle(target.snapshot_json)
+        diffs: list[SnapshotEntityDiff] = []
+        total_changed = 0
+
+        world_changed = int(self._canonical(base_bundle["world"]) != self._canonical(target_bundle["world"]))
+        if world_changed:
+            diffs.append(
+                SnapshotEntityDiff(
+                    entity_type="world",
+                    added=0,
+                    removed=0,
+                    changed=world_changed,
+                    sample_changed_refs=(base.world_ref,),
+                )
+            )
+            total_changed += world_changed
+
+        for entity_type in (
+            "continents",
+            "empires",
+            "kingdoms",
+            "regions",
+            "settlements",
+            "points_of_interest",
+            "routes",
+            "races",
+            "subraces",
+            "occupations",
+            "traits",
+            "npcs",
+            "relationships",
+        ):
+            if entity_type in base_bundle["hierarchy"]:
+                base_items = base_bundle["hierarchy"][entity_type]
+                target_items = target_bundle["hierarchy"][entity_type]
+            else:
+                base_items = base_bundle["social"][entity_type]
+                target_items = target_bundle["social"][entity_type]
+            diff = self._diff_entity_list(entity_type, base_items, target_items)
+            if diff.added or diff.removed or diff.changed:
+                diffs.append(diff)
+                total_changed += diff.added + diff.removed + diff.changed
+
+        return SnapshotCompareResult(
+            world_ref=base.world_ref,
+            base_snapshot_ref=base_snapshot_ref,
+            target_snapshot_ref=target_snapshot_ref,
+            total_changed=total_changed,
+            entity_diffs=tuple(diffs),
+        )
+
+    def restore_snapshot(self, snapshot_ref: str) -> SnapshotRestoreSummary:
+        snapshot = self._require_snapshot(snapshot_ref)
+        bundle = self._json_codec.deserialize_world_bundle(snapshot.snapshot_json)
+        world_ref = self._required_text(bundle["world"], "ext_ref", "world")
+        self._replace_world_entities(world_ref)
+
+        restored_counts: dict[str, int] = {}
+        world = self._world_from_payload(bundle["world"])
+        self._world_repository.upsert_world(world)
+        restored_counts["worlds"] = 1
+
+        for payload in bundle["hierarchy"]["continents"]:
+            self._hierarchy_repository.upsert_continent(self._continent_from_payload(payload, world_ref=world_ref))
+            restored_counts["continents"] = restored_counts.get("continents", 0) + 1
+        for payload in bundle["hierarchy"]["empires"]:
+            self._hierarchy_repository.upsert_empire(self._empire_from_payload(payload, world_ref=world_ref))
+            restored_counts["empires"] = restored_counts.get("empires", 0) + 1
+        for payload in bundle["hierarchy"]["kingdoms"]:
+            self._hierarchy_repository.upsert_kingdom(self._kingdom_from_payload(payload, world_ref=world_ref))
+            restored_counts["kingdoms"] = restored_counts.get("kingdoms", 0) + 1
+        for payload in bundle["hierarchy"]["regions"]:
+            self._hierarchy_repository.upsert_region(self._region_from_payload(payload, world_ref=world_ref))
+            restored_counts["regions"] = restored_counts.get("regions", 0) + 1
+        for payload in bundle["hierarchy"]["settlements"]:
+            self._hierarchy_repository.upsert_settlement(
+                self._settlement_from_payload(payload, world_ref=world_ref)
+            )
+            restored_counts["settlements"] = restored_counts.get("settlements", 0) + 1
+        for payload in bundle["hierarchy"]["points_of_interest"]:
+            self._hierarchy_repository.upsert_point_of_interest(
+                self._point_of_interest_from_payload(payload, world_ref=world_ref)
+            )
+            restored_counts["points_of_interest"] = restored_counts.get("points_of_interest", 0) + 1
+        for payload in bundle["hierarchy"]["routes"]:
+            self._hierarchy_repository.upsert_route(self._route_from_payload(payload, world_ref=world_ref))
+            restored_counts["routes"] = restored_counts.get("routes", 0) + 1
+
+        for payload in bundle["social"]["races"]:
+            self._social_repository.upsert_race(self._race_from_payload(payload))
+            restored_counts["races"] = restored_counts.get("races", 0) + 1
+        for payload in bundle["social"]["subraces"]:
+            self._social_repository.upsert_subrace(self._subrace_from_payload(payload))
+            restored_counts["subraces"] = restored_counts.get("subraces", 0) + 1
+        for payload in bundle["social"]["occupations"]:
+            self._social_repository.upsert_occupation(self._occupation_from_payload(payload))
+            restored_counts["occupations"] = restored_counts.get("occupations", 0) + 1
+        for payload in bundle["social"]["traits"]:
+            self._social_repository.upsert_trait(self._trait_from_payload(payload))
+            restored_counts["traits"] = restored_counts.get("traits", 0) + 1
+        for payload in bundle["social"]["npcs"]:
+            self._social_repository.upsert_npc(self._npc_from_payload(payload, world_ref=world_ref))
+            restored_counts["npcs"] = restored_counts.get("npcs", 0) + 1
+        for payload in bundle["social"]["relationships"]:
+            self._social_repository.upsert_relationship(
+                self._relationship_from_payload(payload, world_ref=world_ref)
+            )
+            restored_counts["relationships"] = restored_counts.get("relationships", 0) + 1
+
+        return SnapshotRestoreSummary(
+            snapshot_ref=snapshot_ref,
+            world_ref=world_ref,
+            restored_counts=restored_counts,
+        )
+
+    def export_world_pdf(self, world_ref: str, *, pack_kind: str = PDF_PACK_SUMMARY) -> Path:
         world = self._world_repository.get_world(world_ref)
         if world is None:
             raise ValueError(f"Unknown world: {world_ref}")
-        target = self._exports_dir / f"world-{world_ref}.pdf"
-        self._pdf_exporter.export_world_summary(world, target)
+        if pack_kind not in {PDF_PACK_SUMMARY, PDF_PACK_DM, PDF_PACK_PLAYER}:
+            raise ValueError(f"Unsupported PDF pack kind: {pack_kind}")
+        bundle = self._deserialize_world_bundle_for_ref(world_ref)
+        suffix = "" if pack_kind == PDF_PACK_SUMMARY else f"-{pack_kind}"
+        target = self._exports_dir / f"world-{world_ref}{suffix}.pdf"
+        self._pdf_exporter.export_world_summary(
+            world,
+            target,
+            pack_kind=pack_kind,
+            hierarchy_payload=bundle["hierarchy"],
+            social_payload=bundle["social"],
+        )
         return target
+
+    def _serialize_world_bundle(self, world_ref: str) -> str:
+        world = self._world_repository.get_world(world_ref)
+        if world is None:
+            raise ValueError(f"Unknown world: {world_ref}")
+        hierarchy_payload = {
+            "continents": [asdict(item) for item in self._hierarchy_repository.list_continents(world_ref)],
+            "empires": [asdict(item) for item in self._hierarchy_repository.list_empires(world_ref)],
+            "kingdoms": [asdict(item) for item in self._hierarchy_repository.list_kingdoms(world_ref)],
+            "regions": [asdict(item) for item in self._hierarchy_repository.list_regions(world_ref)],
+            "settlements": [asdict(item) for item in self._hierarchy_repository.list_settlements(world_ref)],
+            "points_of_interest": [
+                asdict(item) for item in self._hierarchy_repository.list_points_of_interest(world_ref)
+            ],
+            "routes": [asdict(item) for item in self._hierarchy_repository.list_routes(world_ref)],
+        }
+        social_payload = {
+            "races": [asdict(item) for item in self._social_repository.list_races()],
+            "subraces": [asdict(item) for item in self._social_repository.list_subraces()],
+            "occupations": [asdict(item) for item in self._social_repository.list_occupations()],
+            "traits": [asdict(item) for item in self._social_repository.list_traits()],
+            "npcs": [asdict(item) for item in self._social_repository.list_npcs(world_ref)],
+            "relationships": [asdict(item) for item in self._social_repository.list_relationships(world_ref)],
+        }
+        payload = {
+            "world": self._json_ready(asdict(world)),
+            "hierarchy": self._json_ready(hierarchy_payload),
+            "social": self._json_ready(social_payload),
+        }
+        return self._json_codec.serialize_world_bundle(
+            world_ref=world_ref,
+            payload=payload,
+            kind="full_world",
+        )
+
+    def _deserialize_world_bundle_for_ref(self, world_ref: str) -> dict[str, Any]:
+        payload = self._serialize_world_bundle(world_ref)
+        return self._json_codec.deserialize_world_bundle(payload)
+
+    def _diff_entity_list(
+        self,
+        entity_type: str,
+        base_items: list[dict[str, object]],
+        target_items: list[dict[str, object]],
+    ) -> SnapshotEntityDiff:
+        base_map = self._map_by_ext_ref(base_items, fallback_prefix=f"{entity_type}:base")
+        target_map = self._map_by_ext_ref(target_items, fallback_prefix=f"{entity_type}:target")
+        base_refs = set(base_map.keys())
+        target_refs = set(target_map.keys())
+        added_refs = sorted(target_refs - base_refs)
+        removed_refs = sorted(base_refs - target_refs)
+        changed_refs: list[str] = []
+        for shared_ref in sorted(base_refs & target_refs):
+            if self._canonical(base_map[shared_ref]) != self._canonical(target_map[shared_ref]):
+                changed_refs.append(shared_ref)
+        return SnapshotEntityDiff(
+            entity_type=entity_type,
+            added=len(added_refs),
+            removed=len(removed_refs),
+            changed=len(changed_refs),
+            sample_added_refs=tuple(added_refs[:5]),
+            sample_removed_refs=tuple(removed_refs[:5]),
+            sample_changed_refs=tuple(changed_refs[:5]),
+        )
+
+    def _replace_world_entities(self, world_ref: str) -> None:
+        for route in self._hierarchy_repository.list_routes(world_ref):
+            self._hierarchy_repository.delete_route(route.ext_ref)
+        for poi in self._hierarchy_repository.list_points_of_interest(world_ref):
+            self._hierarchy_repository.delete_point_of_interest(poi.ext_ref)
+        for settlement in self._hierarchy_repository.list_settlements(world_ref):
+            self._hierarchy_repository.delete_settlement(settlement.ext_ref)
+        for region in self._hierarchy_repository.list_regions(world_ref):
+            self._hierarchy_repository.delete_region(region.ext_ref)
+        for kingdom in self._hierarchy_repository.list_kingdoms(world_ref):
+            self._hierarchy_repository.delete_kingdom(kingdom.ext_ref)
+        for empire in self._hierarchy_repository.list_empires(world_ref):
+            self._hierarchy_repository.delete_empire(empire.ext_ref)
+        for continent in self._hierarchy_repository.list_continents(world_ref):
+            self._hierarchy_repository.delete_continent(continent.ext_ref)
+        for relationship in self._social_repository.list_relationships(world_ref):
+            self._social_repository.delete_relationship(relationship.ext_ref)
+        for npc in self._social_repository.list_npcs(world_ref):
+            self._social_repository.delete_npc(npc.ext_ref)
+
+    def _world_from_payload(self, payload: dict[str, object]) -> World:
+        return World(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "world"),
+            name=self._required_text(payload, "name", "world"),
+            description=str(payload.get("description", "")).strip(),
+            active_ruleset_ref=self._optional_text(payload.get("active_ruleset_ref")),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _continent_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Continent:
+        return Continent(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "continent"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            name=self._required_text(payload, "name", "continent"),
+            climate_summary=str(payload.get("climate_summary", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _empire_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Empire:
+        return Empire(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "empire"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            continent_ref=self._optional_text(payload.get("continent_ref")),
+            name=self._required_text(payload, "name", "empire"),
+            governing_style=str(payload.get("governing_style", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _kingdom_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Kingdom:
+        return Kingdom(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "kingdom"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            empire_ref=self._optional_text(payload.get("empire_ref")),
+            name=self._required_text(payload, "name", "kingdom"),
+            stability_index=self._to_float(payload.get("stability_index"), 0.5),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _region_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Region:
+        return Region(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "region"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            kingdom_ref=self._optional_text(payload.get("kingdom_ref")),
+            name=self._required_text(payload, "name", "region"),
+            biome=str(payload.get("biome", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _settlement_from_payload(self, payload: dict[str, object], *, world_ref: str) -> SettlementNode:
+        return SettlementNode(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "settlement"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            region_ref=self._optional_text(payload.get("region_ref")),
+            name=self._required_text(payload, "name", "settlement"),
+            kind=SettlementType(str(payload.get("kind", SettlementType.VILLAGE.value))),
+            population=self._to_int(payload.get("population"), 100),
+            resource_index=self._to_float(payload.get("resource_index"), 0.5),
+            safety_index=self._to_float(payload.get("safety_index"), 0.5),
+            x=self._to_float(payload.get("x"), 0.0),
+            y=self._to_float(payload.get("y"), 0.0),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _point_of_interest_from_payload(
+        self,
+        payload: dict[str, object],
+        *,
+        world_ref: str,
+    ) -> PointOfInterest:
+        return PointOfInterest(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "point_of_interest"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            region_ref=self._optional_text(payload.get("region_ref")),
+            name=self._required_text(payload, "name", "point_of_interest"),
+            node_type=NodeType(str(payload.get("node_type", NodeType.POINT_OF_INTEREST.value))),
+            x=self._to_float(payload.get("x"), 0.0),
+            y=self._to_float(payload.get("y"), 0.0),
+            description=str(payload.get("description", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _route_from_payload(self, payload: dict[str, object], *, world_ref: str) -> RouteConnection:
+        return RouteConnection(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "route"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            name=self._required_text(payload, "name", "route"),
+            source_ref=self._required_text(payload, "source_ref", "route"),
+            target_ref=self._required_text(payload, "target_ref", "route"),
+            route_type=str(payload.get("route_type", "road")).strip() or "road",
+            travel_cost=self._to_float(payload.get("travel_cost"), 1.0),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _race_from_payload(self, payload: dict[str, object]) -> Race:
+        return Race(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "race"),
+            name=self._required_text(payload, "name", "race"),
+            lifespan_years=self._to_int(payload.get("lifespan_years"), 80),
+            is_default=bool(payload.get("is_default", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _subrace_from_payload(self, payload: dict[str, object]) -> SubRace:
+        return SubRace(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "subrace"),
+            race_ref=self._required_text(payload, "race_ref", "subrace"),
+            name=self._required_text(payload, "name", "subrace"),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _occupation_from_payload(self, payload: dict[str, object]) -> Occupation:
+        return Occupation(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "occupation"),
+            name=self._required_text(payload, "name", "occupation"),
+            category=str(payload.get("category", "")).strip(),
+            rarity=self._to_float(payload.get("rarity"), 1.0),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _trait_from_payload(self, payload: dict[str, object]) -> Trait:
+        return Trait(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "trait"),
+            name=self._required_text(payload, "name", "trait"),
+            polarity=self._to_float(payload.get("polarity"), 0.0),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _npc_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Npc:
+        return Npc(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "npc"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            display_name=self._required_text(payload, "display_name", "npc"),
+            age_years=self._to_int(payload.get("age_years"), 20),
+            race_ref=self._required_text(payload, "race_ref", "npc"),
+            subrace_ref=self._optional_text(payload.get("subrace_ref")),
+            occupation_ref=self._optional_text(payload.get("occupation_ref")),
+            residence_node_ref=self._optional_text(payload.get("residence_node_ref")),
+            health_index=self._to_float(payload.get("health_index"), 1.0),
+            wealth_index=self._to_float(payload.get("wealth_index"), 0.5),
+            is_locked=bool(payload.get("is_locked", False)),
+            notes=str(payload.get("notes", "")).strip(),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _relationship_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Relationship:
+        return Relationship(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "relationship"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            source_npc_ref=self._required_text(payload, "source_npc_ref", "relationship"),
+            target_npc_ref=self._required_text(payload, "target_npc_ref", "relationship"),
+            relation_type=RelationshipType(
+                str(payload.get("relation_type", RelationshipType.FRIEND.value))
+            ),
+            weight=self._to_float(payload.get("weight"), 0.0),
+            history=self._to_history(payload.get("history")),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _require_snapshot(self, snapshot_ref: str) -> SnapshotRecord:
+        snapshot = self._world_repository.get_snapshot(snapshot_ref)
+        if snapshot is None:
+            raise ValueError(f"Unknown snapshot: {snapshot_ref}")
+        return snapshot
+
+    @staticmethod
+    def _required_text(payload: dict[str, object], key: str, entity_label: str) -> str:
+        raw = payload.get(key)
+        if raw is None:
+            raise ValueError(f"Invalid {entity_label} payload: missing '{key}'.")
+        text = str(raw).strip()
+        if not text:
+            raise ValueError(f"Invalid {entity_label} payload: empty '{key}'.")
+        return text
+
+    @staticmethod
+    def _optional_text(value: object | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _to_int(value: object | None, default: int) -> int:
+        if value is None or value == "":
+            return default
+        return int(value)
+
+    @staticmethod
+    def _to_float(value: object | None, default: float) -> float:
+        if value is None or value == "":
+            return default
+        return float(value)
+
+    @staticmethod
+    def _to_metadata(value: object | None) -> dict[str, object]:
+        if isinstance(value, dict):
+            return dict(value)
+        return {}
+
+    @staticmethod
+    def _to_history(value: object | None) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        text = str(value).strip()
+        if not text:
+            return []
+        return [line.strip() for line in text.splitlines() if line.strip()]
+
+    def _map_by_ext_ref(
+        self,
+        items: list[dict[str, object]],
+        *,
+        fallback_prefix: str,
+    ) -> dict[str, dict[str, object]]:
+        mapped: dict[str, dict[str, object]] = {}
+        for index, item in enumerate(items):
+            ext_ref = str(item.get("ext_ref") or f"{fallback_prefix}:{index}")
+            mapped[ext_ref] = item
+        return mapped
+
+    @staticmethod
+    def _canonical(value: object) -> str:
+        return json.dumps(ImportExportService._json_ready(value), sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _json_ready(value: object) -> object:
+        if isinstance(value, dict):
+            return {str(key): ImportExportService._json_ready(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [ImportExportService._json_ready(item) for item in value]
+        if isinstance(value, tuple):
+            return [ImportExportService._json_ready(item) for item in value]
+        if hasattr(value, "isoformat"):
+            try:
+                return value.isoformat()
+            except Exception:
+                return str(value)
+        if hasattr(value, "value"):
+            enum_value = getattr(value, "value")
+            if isinstance(enum_value, (str, int, float, bool)):
+                return enum_value
+        return value

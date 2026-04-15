@@ -84,3 +84,14 @@ class RouteConnection(EntityBase):
     target_ref: str = ""
     route_type: str = "road"
     travel_cost: float = 1.0
+
+
+@dataclass
+class SnapshotRecord:
+    id: int | None
+    ext_ref: str
+    world_ref: str
+    name: str
+    snapshot_json: str
+    checksum: str
+    created_utc: datetime = field(default_factory=utc_now)
