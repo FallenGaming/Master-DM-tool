@@ -49,6 +49,8 @@ def build_container() -> ServiceContainer:
     multi_scale_map_service = MultiScaleMapService(MapProjectionService(hierarchy_service))
     import_export_service = ImportExportService(
         world_repository=world_repository,
+        hierarchy_repository=hierarchy_repository,
+        social_repository=social_repository,
         json_codec=JsonWorldCodec(),
         pdf_exporter=PdfExporter(),
         exports_dir=paths.exports_dir,

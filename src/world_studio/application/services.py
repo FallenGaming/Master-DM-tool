@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
+from typing import Any, Callable
 from uuid import uuid4
 
 from world_studio.data.repositories import (
@@ -11,7 +12,7 @@ from world_studio.data.repositories import (
     WorldRepository,
 )
 from world_studio.domain.enums import NodeType, RelationshipType, SettlementType
-from world_studio.domain.population import Npc, Occupation, Race, Relationship
+from world_studio.domain.population import Npc, Occupation, Race, Relationship, SubRace, Trait
 from world_studio.domain.simulation import NoOpPass, SimulationEngine, SimulationRequest, SimulationRun
 from world_studio.domain.world import (
     Continent,
@@ -619,15 +620,47 @@ class GenerationAppService:
         )
 
 
+IMPORT_MODE_MERGE = "merge"
+IMPORT_MODE_REPLACE = "replace"
+CONFLICT_KEEP_IMPORTED = "keep_imported"
+CONFLICT_KEEP_LOCAL = "keep_local"
+
+
+@dataclass
+class ImportRunSummary:
+    world_ref: str
+    mode: str
+    conflict_policy: str
+    preview_only: bool
+    created: dict[str, int] = field(default_factory=dict)
+    updated: dict[str, int] = field(default_factory=dict)
+    skipped: dict[str, int] = field(default_factory=dict)
+    conflicts: list[str] = field(default_factory=list)
+
+    def bump_created(self, entity_type: str) -> None:
+        self.created[entity_type] = self.created.get(entity_type, 0) + 1
+
+    def bump_updated(self, entity_type: str) -> None:
+        self.updated[entity_type] = self.updated.get(entity_type, 0) + 1
+
+    def bump_skipped(self, entity_type: str, reason: str) -> None:
+        self.skipped[entity_type] = self.skipped.get(entity_type, 0) + 1
+        self.conflicts.append(reason)
+
+
 class ImportExportService:
     def __init__(
         self,
         world_repository: WorldRepository,
+        hierarchy_repository: HierarchyRepository,
+        social_repository: SocialRepository,
         json_codec: JsonWorldCodec,
         pdf_exporter: PdfExporter,
         exports_dir: Path,
     ) -> None:
         self._world_repository = world_repository
+        self._hierarchy_repository = hierarchy_repository
+        self._social_repository = social_repository
         self._json_codec = json_codec
         self._pdf_exporter = pdf_exporter
         self._exports_dir = exports_dir
@@ -637,15 +670,242 @@ class ImportExportService:
         world = self._world_repository.get_world(world_ref)
         if world is None:
             raise ValueError(f"Unknown world: {world_ref}")
-        payload = self._json_codec.serialize_world(asdict(world))
+        hierarchy_payload = {
+            "continents": [asdict(item) for item in self._hierarchy_repository.list_continents(world_ref)],
+            "empires": [asdict(item) for item in self._hierarchy_repository.list_empires(world_ref)],
+            "kingdoms": [asdict(item) for item in self._hierarchy_repository.list_kingdoms(world_ref)],
+            "regions": [asdict(item) for item in self._hierarchy_repository.list_regions(world_ref)],
+            "settlements": [asdict(item) for item in self._hierarchy_repository.list_settlements(world_ref)],
+            "points_of_interest": [
+                asdict(item) for item in self._hierarchy_repository.list_points_of_interest(world_ref)
+            ],
+            "routes": [asdict(item) for item in self._hierarchy_repository.list_routes(world_ref)],
+        }
+        social_payload = {
+            "races": [asdict(item) for item in self._social_repository.list_races()],
+            "subraces": [asdict(item) for item in self._social_repository.list_subraces()],
+            "occupations": [asdict(item) for item in self._social_repository.list_occupations()],
+            "traits": [asdict(item) for item in self._social_repository.list_traits()],
+            "npcs": [asdict(item) for item in self._social_repository.list_npcs(world_ref)],
+            "relationships": [
+                asdict(item) for item in self._social_repository.list_relationships(world_ref)
+            ],
+        }
+        payload = self._json_codec.serialize_world_bundle(
+            world_ref=world_ref,
+            payload={
+                "world": asdict(world),
+                "hierarchy": hierarchy_payload,
+                "social": social_payload,
+            },
+            kind="full_world",
+        )
         target = self._exports_dir / f"world-{world_ref}.json"
         target.write_text(payload, encoding="utf-8")
         return target
 
-    def import_world_json(self, source: Path) -> World:
-        model = self._json_codec.deserialize_world(source.read_text(encoding="utf-8"))
-        world = World(**model)
-        return self._world_repository.upsert_world(world)
+    def import_world_json(
+        self,
+        source: Path,
+        *,
+        mode: str = IMPORT_MODE_MERGE,
+        conflict_policy: str = CONFLICT_KEEP_IMPORTED,
+        preview_only: bool = False,
+    ) -> ImportRunSummary:
+        if mode not in {IMPORT_MODE_MERGE, IMPORT_MODE_REPLACE}:
+            raise ValueError(f"Unsupported import mode: {mode}")
+        if conflict_policy not in {CONFLICT_KEEP_IMPORTED, CONFLICT_KEEP_LOCAL}:
+            raise ValueError(f"Unsupported conflict policy: {conflict_policy}")
+
+        bundle = self._json_codec.deserialize_world_bundle(source.read_text(encoding="utf-8"))
+        world_payload = bundle["world"]
+        world_ref = self._required_text(world_payload, "ext_ref", "world")
+        summary = ImportRunSummary(
+            world_ref=world_ref,
+            mode=mode,
+            conflict_policy=conflict_policy,
+            preview_only=preview_only,
+        )
+
+        if mode == IMPORT_MODE_REPLACE:
+            self._replace_world_entities(world_ref, preview_only=preview_only)
+
+        self._upsert_entity(
+            entity_type="worlds",
+            ext_ref=world_ref,
+            existing_lookup=self._world_repository.get_world,
+            perform_upsert=lambda: self._world_repository.upsert_world(
+                self._world_from_payload(world_payload)
+            ),
+            conflict_policy=conflict_policy,
+            summary=summary,
+            assume_missing=False,
+            preview_only=preview_only,
+        )
+
+        hierarchy = bundle["hierarchy"]
+        social = bundle["social"]
+        assume_hierarchy_missing = mode == IMPORT_MODE_REPLACE
+
+        for payload in hierarchy["continents"]:
+            entity = self._continent_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="continents",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._hierarchy_repository.get_continent,
+                perform_upsert=lambda item=entity: self._hierarchy_repository.upsert_continent(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+        for payload in hierarchy["empires"]:
+            entity = self._empire_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="empires",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._hierarchy_repository.get_empire,
+                perform_upsert=lambda item=entity: self._hierarchy_repository.upsert_empire(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+        for payload in hierarchy["kingdoms"]:
+            entity = self._kingdom_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="kingdoms",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._hierarchy_repository.get_kingdom,
+                perform_upsert=lambda item=entity: self._hierarchy_repository.upsert_kingdom(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+        for payload in hierarchy["regions"]:
+            entity = self._region_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="regions",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._hierarchy_repository.get_region,
+                perform_upsert=lambda item=entity: self._hierarchy_repository.upsert_region(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+        for payload in hierarchy["settlements"]:
+            entity = self._settlement_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="settlements",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._hierarchy_repository.get_settlement,
+                perform_upsert=lambda item=entity: self._hierarchy_repository.upsert_settlement(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+        for payload in hierarchy["points_of_interest"]:
+            entity = self._point_of_interest_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="points_of_interest",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._hierarchy_repository.get_point_of_interest,
+                perform_upsert=lambda item=entity: self._hierarchy_repository.upsert_point_of_interest(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+        for payload in hierarchy["routes"]:
+            entity = self._route_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="routes",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._hierarchy_repository.get_route,
+                perform_upsert=lambda item=entity: self._hierarchy_repository.upsert_route(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+
+        for payload in social["races"]:
+            entity = self._race_from_payload(payload)
+            self._upsert_entity(
+                entity_type="races",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._social_repository.get_race,
+                perform_upsert=lambda item=entity: self._social_repository.upsert_race(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=False,
+                preview_only=preview_only,
+            )
+        for payload in social["subraces"]:
+            entity = self._subrace_from_payload(payload)
+            self._upsert_entity(
+                entity_type="subraces",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._social_repository.get_subrace,
+                perform_upsert=lambda item=entity: self._social_repository.upsert_subrace(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=False,
+                preview_only=preview_only,
+            )
+        for payload in social["occupations"]:
+            entity = self._occupation_from_payload(payload)
+            self._upsert_entity(
+                entity_type="occupations",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._social_repository.get_occupation,
+                perform_upsert=lambda item=entity: self._social_repository.upsert_occupation(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=False,
+                preview_only=preview_only,
+            )
+        for payload in social["traits"]:
+            entity = self._trait_from_payload(payload)
+            self._upsert_entity(
+                entity_type="traits",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._social_repository.get_trait,
+                perform_upsert=lambda item=entity: self._social_repository.upsert_trait(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=False,
+                preview_only=preview_only,
+            )
+        for payload in social["npcs"]:
+            entity = self._npc_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="npcs",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._social_repository.get_npc,
+                perform_upsert=lambda item=entity: self._social_repository.upsert_npc(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+        for payload in social["relationships"]:
+            entity = self._relationship_from_payload(payload, world_ref=world_ref)
+            self._upsert_entity(
+                entity_type="relationships",
+                ext_ref=entity.ext_ref,
+                existing_lookup=self._social_repository.get_relationship,
+                perform_upsert=lambda item=entity: self._social_repository.upsert_relationship(item),
+                conflict_policy=conflict_policy,
+                summary=summary,
+                assume_missing=assume_hierarchy_missing,
+                preview_only=preview_only,
+            )
+
+        return summary
 
     def export_world_pdf(self, world_ref: str) -> Path:
         world = self._world_repository.get_world(world_ref)
@@ -654,3 +914,277 @@ class ImportExportService:
         target = self._exports_dir / f"world-{world_ref}.pdf"
         self._pdf_exporter.export_world_summary(world, target)
         return target
+
+    def _upsert_entity(
+        self,
+        *,
+        entity_type: str,
+        ext_ref: str,
+        existing_lookup: Callable[[str], object | None],
+        perform_upsert: Callable[[], object],
+        conflict_policy: str,
+        summary: ImportRunSummary,
+        assume_missing: bool,
+        preview_only: bool,
+    ) -> None:
+        existing = None if assume_missing else existing_lookup(ext_ref)
+        if existing is None:
+            summary.bump_created(entity_type)
+            if not preview_only:
+                perform_upsert()
+            return
+        if conflict_policy == CONFLICT_KEEP_LOCAL:
+            summary.bump_skipped(entity_type, f"{entity_type}:{ext_ref}:kept local")
+            return
+        summary.bump_updated(entity_type)
+        if not preview_only:
+            perform_upsert()
+
+    def _replace_world_entities(self, world_ref: str, *, preview_only: bool) -> None:
+        if preview_only:
+            return
+        for route in self._hierarchy_repository.list_routes(world_ref):
+            self._hierarchy_repository.delete_route(route.ext_ref)
+        for poi in self._hierarchy_repository.list_points_of_interest(world_ref):
+            self._hierarchy_repository.delete_point_of_interest(poi.ext_ref)
+        for settlement in self._hierarchy_repository.list_settlements(world_ref):
+            self._hierarchy_repository.delete_settlement(settlement.ext_ref)
+        for region in self._hierarchy_repository.list_regions(world_ref):
+            self._hierarchy_repository.delete_region(region.ext_ref)
+        for kingdom in self._hierarchy_repository.list_kingdoms(world_ref):
+            self._hierarchy_repository.delete_kingdom(kingdom.ext_ref)
+        for empire in self._hierarchy_repository.list_empires(world_ref):
+            self._hierarchy_repository.delete_empire(empire.ext_ref)
+        for continent in self._hierarchy_repository.list_continents(world_ref):
+            self._hierarchy_repository.delete_continent(continent.ext_ref)
+        for relationship in self._social_repository.list_relationships(world_ref):
+            self._social_repository.delete_relationship(relationship.ext_ref)
+        for npc in self._social_repository.list_npcs(world_ref):
+            self._social_repository.delete_npc(npc.ext_ref)
+
+    def _world_from_payload(self, payload: dict[str, object]) -> World:
+        return World(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "world"),
+            name=self._required_text(payload, "name", "world"),
+            description=str(payload.get("description", "")).strip(),
+            active_ruleset_ref=self._optional_text(payload.get("active_ruleset_ref")),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _continent_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Continent:
+        return Continent(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "continent"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            name=self._required_text(payload, "name", "continent"),
+            climate_summary=str(payload.get("climate_summary", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _empire_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Empire:
+        return Empire(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "empire"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            continent_ref=self._optional_text(payload.get("continent_ref")),
+            name=self._required_text(payload, "name", "empire"),
+            governing_style=str(payload.get("governing_style", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _kingdom_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Kingdom:
+        return Kingdom(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "kingdom"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            empire_ref=self._optional_text(payload.get("empire_ref")),
+            name=self._required_text(payload, "name", "kingdom"),
+            stability_index=self._to_float(payload.get("stability_index"), 0.5),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _region_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Region:
+        return Region(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "region"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            kingdom_ref=self._optional_text(payload.get("kingdom_ref")),
+            name=self._required_text(payload, "name", "region"),
+            biome=str(payload.get("biome", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _settlement_from_payload(self, payload: dict[str, object], *, world_ref: str) -> SettlementNode:
+        return SettlementNode(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "settlement"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            region_ref=self._optional_text(payload.get("region_ref")),
+            name=self._required_text(payload, "name", "settlement"),
+            kind=SettlementType(str(payload.get("kind", SettlementType.VILLAGE.value))),
+            population=self._to_int(payload.get("population"), 100),
+            resource_index=self._to_float(payload.get("resource_index"), 0.5),
+            safety_index=self._to_float(payload.get("safety_index"), 0.5),
+            x=self._to_float(payload.get("x"), 0.0),
+            y=self._to_float(payload.get("y"), 0.0),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _point_of_interest_from_payload(
+        self,
+        payload: dict[str, object],
+        *,
+        world_ref: str,
+    ) -> PointOfInterest:
+        return PointOfInterest(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "point_of_interest"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            region_ref=self._optional_text(payload.get("region_ref")),
+            name=self._required_text(payload, "name", "point_of_interest"),
+            node_type=NodeType(str(payload.get("node_type", NodeType.POINT_OF_INTEREST.value))),
+            x=self._to_float(payload.get("x"), 0.0),
+            y=self._to_float(payload.get("y"), 0.0),
+            description=str(payload.get("description", "")).strip(),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _route_from_payload(self, payload: dict[str, object], *, world_ref: str) -> RouteConnection:
+        return RouteConnection(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "route"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            name=self._required_text(payload, "name", "route"),
+            source_ref=self._required_text(payload, "source_ref", "route"),
+            target_ref=self._required_text(payload, "target_ref", "route"),
+            route_type=str(payload.get("route_type", "road")).strip() or "road",
+            travel_cost=self._to_float(payload.get("travel_cost"), 1.0),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _race_from_payload(self, payload: dict[str, object]) -> Race:
+        return Race(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "race"),
+            name=self._required_text(payload, "name", "race"),
+            lifespan_years=self._to_int(payload.get("lifespan_years"), 80),
+            is_default=bool(payload.get("is_default", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _subrace_from_payload(self, payload: dict[str, object]) -> SubRace:
+        return SubRace(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "subrace"),
+            race_ref=self._required_text(payload, "race_ref", "subrace"),
+            name=self._required_text(payload, "name", "subrace"),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _occupation_from_payload(self, payload: dict[str, object]) -> Occupation:
+        return Occupation(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "occupation"),
+            name=self._required_text(payload, "name", "occupation"),
+            category=str(payload.get("category", "")).strip(),
+            rarity=self._to_float(payload.get("rarity"), 1.0),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _trait_from_payload(self, payload: dict[str, object]) -> Trait:
+        return Trait(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "trait"),
+            name=self._required_text(payload, "name", "trait"),
+            polarity=self._to_float(payload.get("polarity"), 0.0),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _npc_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Npc:
+        return Npc(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "npc"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            display_name=self._required_text(payload, "display_name", "npc"),
+            age_years=self._to_int(payload.get("age_years"), 20),
+            race_ref=self._required_text(payload, "race_ref", "npc"),
+            subrace_ref=self._optional_text(payload.get("subrace_ref")),
+            occupation_ref=self._optional_text(payload.get("occupation_ref")),
+            residence_node_ref=self._optional_text(payload.get("residence_node_ref")),
+            health_index=self._to_float(payload.get("health_index"), 1.0),
+            wealth_index=self._to_float(payload.get("wealth_index"), 0.5),
+            is_locked=bool(payload.get("is_locked", False)),
+            notes=str(payload.get("notes", "")).strip(),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    def _relationship_from_payload(self, payload: dict[str, object], *, world_ref: str) -> Relationship:
+        return Relationship(
+            id=None,
+            ext_ref=self._required_text(payload, "ext_ref", "relationship"),
+            world_ref=self._optional_text(payload.get("world_ref")) or world_ref,
+            source_npc_ref=self._required_text(payload, "source_npc_ref", "relationship"),
+            target_npc_ref=self._required_text(payload, "target_npc_ref", "relationship"),
+            relation_type=RelationshipType(
+                str(payload.get("relation_type", RelationshipType.FRIEND.value))
+            ),
+            weight=self._to_float(payload.get("weight"), 0.0),
+            history=self._to_history(payload.get("history")),
+            is_locked=bool(payload.get("is_locked", False)),
+            metadata=self._to_metadata(payload.get("metadata")),
+        )
+
+    @staticmethod
+    def _required_text(payload: dict[str, object], key: str, entity_label: str) -> str:
+        raw = payload.get(key)
+        if raw is None:
+            raise ValueError(f"Invalid {entity_label} payload: missing '{key}'.")
+        text = str(raw).strip()
+        if not text:
+            raise ValueError(f"Invalid {entity_label} payload: empty '{key}'.")
+        return text
+
+    @staticmethod
+    def _optional_text(value: object | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _to_int(value: object | None, default: int) -> int:
+        if value is None or value == "":
+            return default
+        return int(value)
+
+    @staticmethod
+    def _to_float(value: object | None, default: float) -> float:
+        if value is None or value == "":
+            return default
+        return float(value)
+
+    @staticmethod
+    def _to_metadata(value: object | None) -> dict[str, object]:
+        if isinstance(value, dict):
+            return dict(value)
+        return {}
+
+    @staticmethod
+    def _to_history(value: object | None) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        text = str(value).strip()
+        if not text:
+            return []
+        return [line.strip() for line in text.splitlines() if line.strip()]

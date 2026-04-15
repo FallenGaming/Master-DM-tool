@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import Qt
@@ -21,13 +22,19 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTextEdit,
     QPlainTextEdit,
+    QFileDialog,
     QVBoxLayout,
     QWidget,
 )
 
 from world_studio.application.services import (
+    CONFLICT_KEEP_IMPORTED,
+    CONFLICT_KEEP_LOCAL,
     GenerationAppService,
     HierarchyService,
+    IMPORT_MODE_MERGE,
+    IMPORT_MODE_REPLACE,
+    ImportRunSummary,
     ImportExportService,
     SocialService,
     SimulationService,
@@ -1091,13 +1098,35 @@ class ImportExportPage(QWidget):
         layout = QVBoxLayout(self)
         self._world_ref_input = QLineEdit()
         self._world_ref_input.setPlaceholderText("world ext_ref")
+        self._import_path_input = QLineEdit()
+        self._import_path_input.setPlaceholderText("path to .json bundle")
+        self._import_mode = QComboBox()
+        self._import_mode.addItems([IMPORT_MODE_MERGE, IMPORT_MODE_REPLACE])
+        self._conflict_policy = QComboBox()
+        self._conflict_policy.addItems([CONFLICT_KEEP_IMPORTED, CONFLICT_KEEP_LOCAL])
+        self._preview_only = QCheckBox("Preview only (no writes)")
         self._output = QTextEdit()
         self._output.setReadOnly(True)
 
         export_json = QPushButton("Export World JSON")
         export_json.clicked.connect(self._export_json)
+        import_json = QPushButton("Import World JSON")
+        import_json.clicked.connect(self._import_json)
+        browse_import = QPushButton("Browse")
+        browse_import.clicked.connect(self._browse_import)
         export_pdf = QPushButton("Export World PDF")
         export_pdf.clicked.connect(self._export_pdf)
+
+        import_form = QFormLayout()
+        import_form.addRow("Import JSON", self._import_path_input)
+        import_form.addRow("Import Mode", self._import_mode)
+        import_form.addRow("Conflict Policy", self._conflict_policy)
+        import_form.addRow("", self._preview_only)
+
+        import_buttons = QHBoxLayout()
+        import_buttons.addWidget(browse_import)
+        import_buttons.addWidget(import_json)
+        import_buttons.addStretch()
 
         button_row = QHBoxLayout()
         button_row.addWidget(export_json)
@@ -1106,6 +1135,8 @@ class ImportExportPage(QWidget):
 
         layout.addWidget(QLabel("Import / Export"))
         layout.addWidget(self._world_ref_input)
+        layout.addLayout(import_form)
+        layout.addLayout(import_buttons)
         layout.addLayout(button_row)
         layout.addWidget(self._output)
 
@@ -1130,6 +1161,38 @@ class ImportExportPage(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "Export", str(exc))
 
+    def _browse_import(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose world bundle",
+            str(Path.cwd()),
+            "JSON files (*.json);;All files (*)",
+        )
+        if chosen:
+            self._import_path_input.setText(chosen)
+
+    def _import_json(self) -> None:
+        source_text = self._import_path_input.text().strip()
+        if not source_text:
+            QMessageBox.warning(self, "Import", "Provide a JSON import path.")
+            return
+        source = Path(source_text)
+        if not source.exists():
+            QMessageBox.warning(self, "Import", f"File does not exist: {source}")
+            return
+        try:
+            summary = self._import_export_service.import_world_json(
+                source,
+                mode=self._import_mode.currentText(),
+                conflict_policy=self._conflict_policy.currentText(),
+                preview_only=self._preview_only.isChecked(),
+            )
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Import", str(exc))
+            return
+        self._output.setPlainText(self._format_import_summary(summary, source))
+        self._world_ref_input.setText(summary.world_ref)
+
     def _export_pdf(self) -> None:
         world_ref = self._target_world_ref()
         if not world_ref:
@@ -1140,6 +1203,39 @@ class ImportExportPage(QWidget):
             self._output.setPlainText(f"Exported PDF:\n{target}")
         except ValueError as exc:
             QMessageBox.warning(self, "Export", str(exc))
+
+    @staticmethod
+    def _format_import_summary(summary: ImportRunSummary, source: Path) -> str:
+        lines = [
+            f"Imported bundle: {source}",
+            f"World Ref: {summary.world_ref}",
+            f"Mode: {summary.mode}",
+            f"Conflict Policy: {summary.conflict_policy}",
+            f"Preview: {'yes' if summary.preview_only else 'no'}",
+            "",
+            "Created:",
+        ]
+        if summary.created:
+            lines.extend([f"- {key}: {value}" for key, value in sorted(summary.created.items())])
+        else:
+            lines.append("- none")
+        lines.append("")
+        lines.append("Updated:")
+        if summary.updated:
+            lines.extend([f"- {key}: {value}" for key, value in sorted(summary.updated.items())])
+        else:
+            lines.append("- none")
+        lines.append("")
+        lines.append("Skipped:")
+        if summary.skipped:
+            lines.extend([f"- {key}: {value}" for key, value in sorted(summary.skipped.items())])
+        else:
+            lines.append("- none")
+        if summary.conflicts:
+            lines.append("")
+            lines.append("Conflicts:")
+            lines.extend([f"- {item}" for item in summary.conflicts[:20]])
+        return "\n".join(lines)
 
 
 class MapPage(QWidget):
