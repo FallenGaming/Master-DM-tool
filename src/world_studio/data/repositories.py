@@ -15,6 +15,7 @@ from world_studio.domain.world import (
     PointOfInterest,
     Region,
     RouteConnection,
+    SnapshotRecord,
     SettlementNode,
     World,
 )
@@ -112,6 +113,56 @@ class WorldRepository(_RepositoryBase):
                 "SELECT * FROM worlds ORDER BY updated_utc DESC, name ASC"
             ).fetchall()
         return [_world_from_row(row) for row in rows]
+
+    def create_snapshot(self, snapshot: SnapshotRecord) -> SnapshotRecord:
+        with self._database.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO snapshots (
+                    ext_ref,
+                    world_ref,
+                    name,
+                    created_utc,
+                    snapshot_json,
+                    checksum
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot.ext_ref,
+                    snapshot.world_ref,
+                    snapshot.name,
+                    snapshot.created_utc.isoformat(),
+                    snapshot.snapshot_json,
+                    snapshot.checksum,
+                ),
+            )
+        snapshot.id = int(cursor.lastrowid)
+        return snapshot
+
+    def get_snapshot(self, ext_ref: str) -> SnapshotRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM snapshots WHERE ext_ref = ?",
+                (ext_ref,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _snapshot_from_row(row)
+
+    def list_snapshots(self, world_ref: str) -> list[SnapshotRecord]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM snapshots
+                WHERE world_ref = ?
+                ORDER BY created_utc DESC, name ASC
+                """,
+                (world_ref,),
+            ).fetchall()
+        return [_snapshot_from_row(row) for row in rows]
+
+    def delete_snapshot(self, ext_ref: str) -> None:
+        self._delete_row("snapshots", ext_ref)
 
 
 class HierarchyRepository(_RepositoryBase):
@@ -551,6 +602,18 @@ def _world_from_row(row: Row) -> World:
         metadata=_parse_json_object(row["metadata_json"]),
         created_utc=_parse_datetime(row["created_utc"]),
         updated_utc=_parse_datetime(row["updated_utc"]),
+    )
+
+
+def _snapshot_from_row(row: Row) -> SnapshotRecord:
+    return SnapshotRecord(
+        id=row["id"],
+        ext_ref=row["ext_ref"],
+        world_ref=row["world_ref"],
+        name=row["name"],
+        snapshot_json=row["snapshot_json"],
+        checksum=row["checksum"],
+        created_utc=_parse_datetime(row["created_utc"]),
     )
 
 
