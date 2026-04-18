@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from uuid import uuid4
 
 from world_studio.domain.enums import SimulationStep
+from world_studio.domain.world import World
 
 
 def utc_now() -> datetime:
@@ -52,6 +54,7 @@ class SimulationChange:
 class SimulationRun:
     id: int | None
     world_ref: str
+    ext_ref: str | None = None
     started_utc: datetime = field(default_factory=utc_now)
     finished_utc: datetime | None = None
     simulated_days: int = 0
@@ -73,7 +76,7 @@ class SimulationRun:
 class SimulationPass(Protocol):
     name: str
 
-    def apply(self, run: SimulationRun) -> None:
+    def apply(self, run: SimulationRun, context: object | None = None) -> None:
         """Apply pass side-effects into simulation run change log."""
 
 
@@ -82,7 +85,7 @@ class NoOpPass:
         self.name = name
         self.note = note
 
-    def apply(self, run: SimulationRun) -> None:
+    def apply(self, run: SimulationRun, context: object | None = None) -> None:
         run.notes.append(f"{self.name}: {self.note}")
 
 
@@ -101,14 +104,15 @@ class SimulationEngine:
             NoOpPass("post", "Run summary and audit persistence pending phase 4."),
         ]
 
-    def run(self, request: SimulationRequest) -> SimulationRun:
+    def run(self, request: SimulationRequest, world: World, context: object | None = None) -> SimulationRun:
         result = SimulationRun(
             id=None,
-            world_ref=request.world_ref,
+            ext_ref=str(uuid4()),
+            world_ref=world.ext_ref,
             simulated_days=request.duration_days(),
             preview_only=request.preview_only,
         )
         for stage in self._passes:
-            stage.apply(result)
+            stage.apply(result, context)
         result.close()
         return result

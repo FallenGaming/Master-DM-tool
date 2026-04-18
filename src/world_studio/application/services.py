@@ -33,7 +33,7 @@ from world_studio.generation.generation_service import (
     WorldGenerationOrchestrator,
     generate_with_payload,
 )
-from world_studio.generation.settlement_promotion_rules import MapAwareSettlementPass
+from world_studio.application.simulation import build_simulation_context, build_simulation_engine
 from world_studio.infrastructure.json_io import JsonWorldCodec
 from world_studio.infrastructure.pdf_export import PdfExporter
 
@@ -353,28 +353,42 @@ class HierarchyService:
 class SimulationService:
     def __init__(
         self,
+        world_service: WorldService,
+        hierarchy_service: HierarchyService,
+        social_service: SocialService,
         world_repository: WorldRepository,
-        hierarchy_repository: HierarchyRepository,
+        import_export_service: ImportExportService,
     ) -> None:
+        self._world_service = world_service
+        self._hierarchy_service = hierarchy_service
+        self._social_service = social_service
         self._world_repository = world_repository
-        self._engine = SimulationEngine(
-            [
-                NoOpPass("precheck", "Validated locks, snapshots, and active rules."),
-                NoOpPass("demography", "Aging and mortality pass pending phase 4."),
-                NoOpPass("economy", "Occupation/economy pass pending phase 4."),
-                NoOpPass("migration", "Migration route scoring pass pending phase 4."),
-                MapAwareSettlementPass(hierarchy_repository),
-                NoOpPass("relationships", "Relationship drift pass pending phase 4."),
-                NoOpPass("events", "Event resolution pass pending phase 5."),
-                NoOpPass("post", "Run summary and audit persistence pending phase 4."),
-            ]
+        self._import_export_service = import_export_service
+        self._engine = build_simulation_engine(
+            hierarchy_service=hierarchy_service,
+            social_service=social_service,
         )
 
     def simulate(self, request: SimulationRequest) -> SimulationRun:
-        if self._world_repository.get_world(request.world_ref) is None:
+        world = self._world_service.get_world(request.world_ref)
+        if world is None:
             msg = f"world_ref does not exist: {request.world_ref}"
             raise ValueError(msg)
-        return self._engine.run(request)
+
+        snapshot_ref: str | None = None
+        if request.create_snapshot:
+            snapshot = self._import_export_service.create_snapshot(world.ext_ref)
+            snapshot_ref = snapshot.ext_ref
+
+        context = build_simulation_context(world, request)
+        run = self._engine.run(request, world, context)
+        if snapshot_ref is not None:
+            run.snapshot_ref = snapshot_ref
+
+        if not run.preview_only:
+            self._world_repository.create_simulation_run(run)
+
+        return run
 
 
 class SocialService:

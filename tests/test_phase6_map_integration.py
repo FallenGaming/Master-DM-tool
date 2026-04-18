@@ -6,10 +6,13 @@ from uuid import uuid4
 from world_studio.application.services import (
     GenerationAppService,
     HierarchyService,
+    ImportExportService,
     SimulationService,
     SocialService,
     WorldService,
 )
+from world_studio.infrastructure.json_io import JsonWorldCodec
+from world_studio.infrastructure.pdf_export import PdfExporter
 from world_studio.data.database import Database
 from world_studio.data.migrations import run_migrations
 from world_studio.data.repositories import HierarchyRepository, SocialRepository, WorldRepository
@@ -26,6 +29,8 @@ def _setup(tmp_path: Path) -> tuple[
     HierarchyRepository,
     WorldService,
     HierarchyService,
+    SocialService,
+    ImportExportService,
     GenerationAppService,
     World,
 ]:
@@ -38,6 +43,14 @@ def _setup(tmp_path: Path) -> tuple[
     world_service = WorldService(world_repository)
     hierarchy_service = HierarchyService(hierarchy_repository)
     social_service = SocialService(social_repository)
+    import_export_service = ImportExportService(
+        world_repository=world_repository,
+        hierarchy_repository=hierarchy_repository,
+        social_repository=social_repository,
+        json_codec=JsonWorldCodec(),
+        pdf_exporter=PdfExporter(),
+        exports_dir=tmp_path / "exports",
+    )
     generation_service = GenerationAppService(
         world_service=world_service,
         hierarchy_service=hierarchy_service,
@@ -56,6 +69,8 @@ def _setup(tmp_path: Path) -> tuple[
         hierarchy_repository,
         world_service,
         hierarchy_service,
+        social_service,
+        import_export_service,
         generation_service,
         world,
     )
@@ -99,6 +114,8 @@ def test_simulation_settlement_pass_persists_map_growth_state(tmp_path: Path) ->
         hierarchy_repository,
         _world_service,
         hierarchy_service,
+        _social_service,
+        import_export_service,
         generation_service,
         world,
     ) = _setup(tmp_path)
@@ -115,7 +132,13 @@ def test_simulation_settlement_pass_persists_map_growth_state(tmp_path: Path) ->
             "npcs_per_settlement_max": 3,
         },
     )
-    simulation_service = SimulationService(world_repository, hierarchy_repository)
+    simulation_service = SimulationService(
+        world_service=_world_service,
+        hierarchy_service=hierarchy_service,
+        social_service=_social_service,
+        world_repository=world_repository,
+        import_export_service=import_export_service,
+    )
     run = simulation_service.simulate(
         SimulationRequest(
             world_ref=world.ext_ref,

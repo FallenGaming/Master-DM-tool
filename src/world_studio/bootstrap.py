@@ -45,8 +45,6 @@ def build_container() -> ServiceContainer:
     hierarchy_service = HierarchyService(hierarchy_repository)
     social_service = SocialService(social_repository)
     generation_service = GenerationAppService(world_service, hierarchy_service, social_service)
-    simulation_service = SimulationService(world_repository, hierarchy_repository)
-    multi_scale_map_service = MultiScaleMapService(MapProjectionService(hierarchy_service))
     import_export_service = ImportExportService(
         world_repository=world_repository,
         hierarchy_repository=hierarchy_repository,
@@ -55,6 +53,14 @@ def build_container() -> ServiceContainer:
         pdf_exporter=PdfExporter(),
         exports_dir=paths.exports_dir,
     )
+    simulation_service = SimulationService(
+        world_service=world_service,
+        hierarchy_service=hierarchy_service,
+        social_service=social_service,
+        world_repository=world_repository,
+        import_export_service=import_export_service,
+    )
+    multi_scale_map_service = MultiScaleMapService(MapProjectionService(hierarchy_service))
     return ServiceContainer(
         paths=paths,
         database=database,

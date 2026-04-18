@@ -4,10 +4,12 @@ import json
 from datetime import UTC, datetime
 from sqlite3 import Row
 from typing import Any
+from uuid import uuid4
 
 from world_studio.data.database import Database
 from world_studio.domain.enums import NodeType, RelationshipType, SettlementType
 from world_studio.domain.population import Npc, Occupation, Race, Relationship, SubRace, Trait
+from world_studio.domain.simulation import SimulationRun
 from world_studio.domain.world import (
     Continent,
     Empire,
@@ -138,6 +140,37 @@ class WorldRepository(_RepositoryBase):
             )
         snapshot.id = int(cursor.lastrowid)
         return snapshot
+
+    def create_simulation_run(self, run: SimulationRun) -> SimulationRun:
+        if run.ext_ref is None:
+            run.ext_ref = str(uuid4())
+        with self._database.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO simulation_runs (
+                    ext_ref,
+                    world_ref,
+                    started_utc,
+                    finished_utc,
+                    simulated_days,
+                    snapshot_ref,
+                    preview_only,
+                    notes_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.ext_ref,
+                    run.world_ref,
+                    run.started_utc.isoformat(),
+                    run.finished_utc.isoformat() if run.finished_utc else None,
+                    run.simulated_days,
+                    run.snapshot_ref,
+                    int(run.preview_only),
+                    json.dumps(run.notes),
+                ),
+            )
+        run.id = int(cursor.lastrowid)
+        return run
 
     def get_snapshot(self, ext_ref: str) -> SnapshotRecord | None:
         with self._database.connect() as connection:
