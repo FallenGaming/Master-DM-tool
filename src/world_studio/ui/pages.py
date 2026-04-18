@@ -82,9 +82,10 @@ class DashboardPage(QWidget):
 
 
 class WorldBrowserPage(QWidget):
-    def __init__(self, world_service: WorldService) -> None:
+    def __init__(self, world_service: WorldService, refresh_worlds_callback: callable) -> None:
         super().__init__()
         self._world_service = world_service
+        self._refresh_worlds_callback = refresh_worlds_callback
 
         root = QHBoxLayout(self)
         left = QVBoxLayout()
@@ -134,6 +135,7 @@ class WorldBrowserPage(QWidget):
         self._name_input.clear()
         self._description_input.clear()
         self.refresh()
+        self._refresh_worlds_callback()
 
     def _on_select(self, value: str) -> None:
         if not value:
@@ -188,18 +190,9 @@ class EntityCrudPanel(QWidget):
         left = QVBoxLayout()
         right = QVBoxLayout()
 
-        world_row = QHBoxLayout()
-        self._world_ref_input = QLineEdit()
-        self._world_ref_input.setPlaceholderText("world ext_ref")
-        world_refresh = QPushButton("Load")
-        world_refresh.clicked.connect(self.refresh)
-        world_row.addWidget(QLabel("World Ref"))
-        world_row.addWidget(self._world_ref_input)
-        world_row.addWidget(world_refresh)
-
         self._list = QListWidget()
         self._list.currentTextChanged.connect(self._on_select)
-        left.addLayout(world_row)
+        left.addWidget(QLabel(f"{spec.title}s"))
         left.addWidget(self._list)
 
         form_box = QGroupBox(f"{spec.title} Editor")
@@ -239,9 +232,12 @@ class EntityCrudPanel(QWidget):
         root.addLayout(left, stretch=2)
         root.addLayout(right, stretch=3)
 
-    def refresh(self) -> None:
-        world_ref = self._resolve_world_ref()
+    def set_world(self, world_ref: str) -> None:
         self._active_world_ref = world_ref
+        self.refresh()
+
+    def refresh(self) -> None:
+        world_ref = self._active_world_ref
         self._list.clear()
         self._current_ext_ref = None
         self._detail.clear()
@@ -251,17 +247,6 @@ class EntityCrudPanel(QWidget):
         records = list_method(world_ref)
         for record in records:
             self._list.addItem(f"{record.name} ({record.ext_ref})")
-
-    def _resolve_world_ref(self) -> str:
-        world_ref = self._world_ref_input.text().strip()
-        if world_ref:
-            return world_ref
-        worlds = self._world_service.list_worlds()
-        if not worlds:
-            return ""
-        world_ref = worlds[0].ext_ref
-        self._world_ref_input.setText(world_ref)
-        return world_ref
 
     def _on_select(self, value: str) -> None:
         if not value:
@@ -301,9 +286,9 @@ class EntityCrudPanel(QWidget):
         return payload
 
     def _create(self) -> None:
-        world_ref = self._resolve_world_ref()
+        world_ref = self._active_world_ref
         if not world_ref:
-            QMessageBox.warning(self, self._spec.title, "Create a world first.")
+            QMessageBox.warning(self, self._spec.title, "Select a world first.")
             return
         create_method = getattr(self._hierarchy_service, self._spec.create_method)
         try:
@@ -390,6 +375,8 @@ class HierarchyEditorPage(QWidget):
         tabs = QTabWidget()
         layout.addWidget(QLabel("Hierarchy Editor"))
         layout.addWidget(tabs)
+
+        self._panels: list[EntityCrudPanel] = []
 
         specs = (
             EntitySpec(
@@ -492,7 +479,19 @@ class HierarchyEditorPage(QWidget):
 
         for spec in specs:
             panel = EntityCrudPanel(world_service, hierarchy_service, spec)
+            self._panels.append(panel)
             tabs.addTab(panel, spec.title)
+
+    def set_world(self, world_ref: str) -> None:
+        for panel in self._panels:
+            panel.set_world(world_ref)
+
+    def set_world(self, world_ref: str) -> None:
+        # Find all EntityCrudPanel in tabs
+        for i in range(self.layout().itemAt(1).widget().count()):
+            panel = self.layout().itemAt(1).widget().widget(i)
+            if isinstance(panel, EntityCrudPanel):
+                panel.set_world(world_ref)
 
 
 class NpcRelationshipPage(QWidget):
@@ -502,19 +501,10 @@ class NpcRelationshipPage(QWidget):
         self._social_service = social_service
         self._selected_npc_ref: str | None = None
         self._selected_relationship_ref: str | None = None
+        self._active_world_ref: str = ""
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("NPC & Relationship Manager"))
-
-        world_row = QHBoxLayout()
-        self._world_ref_input = QLineEdit()
-        self._world_ref_input.setPlaceholderText("world ext_ref")
-        load_button = QPushButton("Load World")
-        load_button.clicked.connect(self.refresh)
-        world_row.addWidget(QLabel("World Ref"))
-        world_row.addWidget(self._world_ref_input)
-        world_row.addWidget(load_button)
-        layout.addLayout(world_row)
 
         split_row = QHBoxLayout()
         split_row.addWidget(self._build_npc_panel(), stretch=1)
@@ -525,6 +515,10 @@ class NpcRelationshipPage(QWidget):
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
         layout.addStretch()
+
+    def set_world(self, world_ref: str) -> None:
+        self._active_world_ref = world_ref
+        self.refresh()
 
     def _build_npc_panel(self) -> QWidget:
         panel = QGroupBox("NPC Editor")
@@ -626,13 +620,13 @@ class NpcRelationshipPage(QWidget):
         return panel
 
     def refresh(self) -> None:
-        world_ref = self._resolve_world_ref()
+        world_ref = self._active_world_ref
         self._npc_list.clear()
         self._relationship_list.clear()
         self._selected_npc_ref = None
         self._selected_relationship_ref = None
         if not world_ref:
-            self._set_status("Create or select a world first.")
+            self._set_status("Select a world first.")
             return
 
         npcs = self._social_service.list_npcs(world_ref)
@@ -664,9 +658,9 @@ class NpcRelationshipPage(QWidget):
         return world_ref
 
     def _create_npc(self) -> None:
-        world_ref = self._resolve_world_ref()
+        world_ref = self._active_world_ref
         if not world_ref:
-            self._set_status("Cannot create NPC without a world.")
+            self._set_status("Select a world first.")
             return
         try:
             self._social_service.create_npc(world_ref, self._npc_payload())
@@ -750,9 +744,9 @@ class NpcRelationshipPage(QWidget):
         self._npc_is_locked.setChecked(False)
 
     def _create_relationship(self) -> None:
-        world_ref = self._resolve_world_ref()
+        world_ref = self._active_world_ref
         if not world_ref:
-            self._set_status("Cannot create relationship without a world.")
+            self._set_status("Select a world first.")
             return
         try:
             self._social_service.create_relationship(world_ref, self._relationship_payload())
@@ -1041,28 +1035,24 @@ class SimulationPage(QWidget):
         super().__init__()
         self._world_service = world_service
         self._simulation_service = simulation_service
+        self._active_world_ref: str = ""
 
         layout = QVBoxLayout(self)
-        self._world_ref_input = QLineEdit()
-        self._world_ref_input.setPlaceholderText("world ext_ref")
         run_button = QPushButton("Run 1 Month Preview")
         run_button.clicked.connect(self._run_preview)
         self._output = QTextEdit()
         self._output.setReadOnly(True)
         layout.addWidget(QLabel("Simulation"))
-        layout.addWidget(self._world_ref_input)
         layout.addWidget(run_button, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self._output)
 
+    def set_world(self, world_ref: str) -> None:
+        self._active_world_ref = world_ref
+
     def _run_preview(self) -> None:
-        world_ref = self._world_ref_input.text().strip()
+        world_ref = self._active_world_ref
         if not world_ref:
-            worlds = self._world_service.list_worlds()
-            if worlds:
-                world_ref = worlds[0].ext_ref
-                self._world_ref_input.setText(world_ref)
-        if not world_ref:
-            QMessageBox.warning(self, "Simulation", "Create a world first.")
+            QMessageBox.warning(self, "Simulation", "Select a world first.")
             return
         try:
             run = self._simulation_service.simulate(
@@ -1094,10 +1084,9 @@ class ImportExportPage(QWidget):
         super().__init__()
         self._world_service = world_service
         self._import_export_service = import_export_service
+        self._active_world_ref: str = ""
 
         layout = QVBoxLayout(self)
-        self._world_ref_input = QLineEdit()
-        self._world_ref_input.setPlaceholderText("world ext_ref")
         self._import_path_input = QLineEdit()
         self._import_path_input.setPlaceholderText("path to world json")
         self._snapshot_name_input = QLineEdit()
@@ -1158,22 +1147,17 @@ class ImportExportPage(QWidget):
         button_row.addStretch()
 
         layout.addWidget(QLabel("Import / Export"))
-        layout.addWidget(self._world_ref_input)
         layout.addLayout(import_row)
         layout.addLayout(snapshot_form)
         layout.addLayout(snapshot_buttons)
         layout.addLayout(button_row)
         layout.addWidget(self._output)
 
+    def set_world(self, world_ref: str) -> None:
+        self._active_world_ref = world_ref
+
     def _target_world_ref(self) -> str:
-        world_ref = self._world_ref_input.text().strip()
-        if world_ref:
-            return world_ref
-        worlds = self._world_service.list_worlds()
-        if worlds:
-            world_ref = worlds[0].ext_ref
-            self._world_ref_input.setText(world_ref)
-        return world_ref
+        return self._active_world_ref
 
     def _export_json(self) -> None:
         world_ref = self._target_world_ref()
@@ -1343,13 +1327,12 @@ class MapPage(QWidget):
         self._world_service = world_service
         self._multi_scale_map_service = multi_scale_map_service
         self._scene = QGraphicsScene()
+        self._active_world_ref: str = ""
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Node Map View"))
 
         controls = QHBoxLayout()
-        self._world_ref_input = QLineEdit()
-        self._world_ref_input.setPlaceholderText("world ext_ref")
         self._focus_ref_input = QLineEdit()
         self._focus_ref_input.setPlaceholderText("optional focus node ref")
         self._scale_input = QComboBox()
@@ -1357,8 +1340,6 @@ class MapPage(QWidget):
         refresh_button = QPushButton("Render Map")
         refresh_button.clicked.connect(self.refresh)
 
-        controls.addWidget(QLabel("World Ref"))
-        controls.addWidget(self._world_ref_input, stretch=2)
         controls.addWidget(QLabel("Scale"))
         controls.addWidget(self._scale_input, stretch=1)
         controls.addWidget(QLabel("Focus Ref"))
@@ -1376,15 +1357,14 @@ class MapPage(QWidget):
         self._summary.setFixedHeight(180)
         layout.addWidget(self._summary)
 
+    def set_world(self, world_ref: str) -> None:
+        self._active_world_ref = world_ref
+
     def refresh(self) -> None:
-        world_ref = self._world_ref_input.text().strip()
+        world_ref = self._active_world_ref
         if not world_ref:
-            worlds = self._world_service.list_worlds()
-            if not worlds:
-                self._summary.setPlainText("Create a world first.")
-                return
-            world_ref = worlds[0].ext_ref
-            self._world_ref_input.setText(world_ref)
+            self._summary.setPlainText("Select a world first.")
+            return
 
         scale = MapScale(self._scale_input.currentText())
         focus_ref = self._focus_ref_input.text().strip() or None
