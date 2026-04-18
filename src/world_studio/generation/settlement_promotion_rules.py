@@ -205,7 +205,7 @@ class MapAwareSettlementPass(SimulationPass):
         self._hierarchy_repository = hierarchy_repository
         self._rules = rules or SettlementPromotionRules()
 
-    def apply(self, run: SimulationRun) -> None:
+    def apply(self, run: SimulationRun, context: object | None = None) -> None:
         settlements = self._hierarchy_repository.list_settlements(run.world_ref)
         routes = self._hierarchy_repository.list_routes(run.world_ref)
         by_ref = {settlement.ext_ref: settlement for settlement in settlements}
